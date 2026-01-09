@@ -7,12 +7,14 @@ A modernized Nintendo Entertainment System (NES) emulator written in JavaScript.
 * ✅ **Pure JavaScript** — Runs in any modern browser, no plugins required
 * ✅ **ES6 Modules** — Clean, maintainable codebase with proper imports/exports
 * ✅ **Modern Audio** — AudioWorklet-based sound with ScriptProcessor fallback
+* ✅ **Expansion Audio Mixing** — MMC5 pulse + PCM audio mixed into APU output
 * ✅ **Capability‑Driven Mappers** — The PPU interacts with mappers strictly through declared behavioral capabilities (no mapper IDs, no method‑presence heuristics)
-* ✅ **Accurate Mapper Emulation** — Correct MMC1, MMC2, MMC3, MMC4, and MMC5 behavior
+* ✅ **Accurate Mapper Emulation** — Correct MMC1, MMC2, MMC3, MMC4, MMC5, and Sunsoft FME-7 (Mapper 069) behavior
 * ✅ **CHR Latch Accuracy** — Hardware‑accurate MMC2/MMC4 latch triggering using real pattern fetch addresses (fine‑Y + both bitplanes)
 * ✅ **Stable IRQ Timing** — MMC3 IRQs driven by true A12 rising‑edge detection
 * ✅ **Drag & Drop ROM Loading** — Load `.nes` files directly into the emulator
 * ✅ **Gamepad Support** — Native browser Gamepad API integration
+* ✅ **Debug Snapshots** — F9 dumps mapper/PPU state including MMC5 audio registers
 
 ## Quick Start
 
@@ -70,6 +72,7 @@ Gamepad support is automatic.
         ├── Mapper003.js        # CNROM
         ├── Mapper004.js        # MMC3
         ├── Mapper005.js        # MMC5
+        ├── mapper005-audio.js  # MMC5 expansion audio module
         ├── Mapper006.js        # FFE
         ├── Mapper007.js        # AxROM
         ├── Mapper009.js        # MMC2
@@ -78,6 +81,7 @@ Gamepad support is automatic.
         ├── Mapper034.js        # BNROM / NINA-001
         ├── Mapper047.js        # NES-QJ
         ├── Mapper066.js        # GxROM
+        ├── Mapper069.js        # Sunsoft FME-7 / Sunsoft 5B
         ├── Mapper079.js        # NINA-03 / NINA-06
         ├── Mapper206.js        # DxROM - Extension of MMC3
         ├── ...
@@ -86,25 +90,26 @@ Gamepad support is automatic.
 
 ## Supported Mappers
 
-| Mapper            | Status      | Notes                                        |
-| ----------------- | :---------: | -------------------------------------------- |
-| NROM (0)          | ✅          | Baseline mapper                              |
-| MMC1 (1)          | ✅          | Correct shift‑register behavior              |
-| UxROM (2)         | ✅          | PRG banking                                  |
-| CNROM (3)         | ✅          | CHR banking                                  |
-| MMC3 (4)          | ✅          | A12‑driven IRQs                              |
-| MMC5 (5)          | ✅          | ExRAM + split screen                         |
-| MMC6 (6)          | ✅          | Extension of MMC3                             |
-| AxROM (7)         | ✅          | 1KB VRAM page switching for nametables       |
-| MMC2 (9)          | ✅          | Accurate CHR latch timing (Punch‑Out!!!)     |
-| MMC4 (10)         | ✅          | Dual latch variant                           |
-| Color Dreams (11) | ✅          | 32KB PRG bank switching                      |
-| VRC2 / VRC4 (25)  | ✅          | 8-bit CHR registers (up to 256KB CHR)        |
-| NINA-001 (34)     | ✅          | 2x 4KB CHR bank switching                    |
-| NES-QJ (47)       | ✅          | Each block has 128k PRG and 128k CHR         |
-| GxROM (66)        | ✅          | CHR-ROM: 8KB switchable banks                |
-| NINA-03 / NINA-06 (79) | ✅     | CHR-ROM: 8KB switchable banks                |
-| DxROM (206)       | ✅          | Extends MMC3 \| No Scanline IRQ              |
+| Mapper                 | Status      | Notes                                        |
+| ---------------------- | :---------: | -------------------------------------------- |
+| NROM (0)               | ✅          | Baseline mapper                              |
+| MMC1 (1)               | ✅          | Correct shift‑register behavior              |
+| UxROM (2)              | ✅          | PRG banking                                  |
+| CNROM (3)              | ✅          | CHR banking                                  |
+| MMC3 (4)               | ✅          | A12‑driven IRQs                              |
+| MMC5 (5)               | ✅          | ExRAM + split screen + MMC5 audio            |
+| MMC6 (6)               | ✅          | Extension of MMC3                            |
+| AxROM (7)              | ✅          | 1KB VRAM page switching for nametables       |
+| MMC2 (9)               | ✅          | Accurate CHR latch timing (Punch‑Out!!!)     |
+| MMC4 (10)              | ✅          | Dual latch variant                           |
+| Color Dreams (11)      | ✅          | 32KB PRG bank switching                      |
+| VRC2 / VRC4 (25)       | ✅          | 8-bit CHR registers (up to 256KB CHR)        |
+| NINA-001 (34)          | ✅          | 2x 4KB CHR bank switching                    |
+| NES-QJ (47)            | ✅          | Each block has 128k PRG and 128k CHR         |
+| GxROM (66)             | ✅          | CHR-ROM: 8KB switchable banks                |
+| Sunsoft FME-7 (69)     | ✅          | PRG/CHR banking + IRQ; 5B audio regs tracked |
+| NINA-03 / NINA-06 (79) | ✅          | CHR-ROM: 8KB switchable banks                |
+| DxROM (206)            | ✅          | Extends MMC3 \| No Scanline IRQ              |
 
 ## Design Philosophy
 
@@ -128,6 +133,12 @@ The emulator uses a two-tier audio system:
 2. **ScriptProcessor** (fallback) — For browsers without AudioWorklet support
 
 Audio samples are batched and sent to the worklet to minimize postMessage overhead.
+Expansion audio sources (such as MMC5) are mixed into the APU output path.
+
+### Debugging
+
+- **F9 snapshot** dumps PPU + mapper state to the console (MMC5 includes audio registers)
+- **F4/F5/F10** toggle bus/MMC5/VRAM logging when supported
 
 ## Credits
 
@@ -136,42 +147,48 @@ This emulator is inspired by other JavaScript NES emulators, but coded to behave
 Contributed by **ZeroGlitch** and an assortment of AI friends.
 
 AI Coding Assistance:
-- [Gemini Pro 3](https://gemini.google.com/)
-- [Claude Code](https://claude.com/)
-- [ChatGPT/Codex](https://chatgpt.com/)
-- [Copilot](https://copilot.microsoft.com/)
+- **[Gemini Pro 3](https://gemini.google.com/)**
+- **[Claude Code](https://claude.com/)**
+- **[ChatGPT/Codex](https://chatgpt.com/)**
+- **[Copilot](https://copilot.microsoft.com/)**
 
 ### Additional Credits
 
 Thanks to the creators of various reference emulators. Extremely valuable for the mapper conversions from C++ to JavaScript. Most notably:
 
+#### Primary Reference Emulators
+
 - **[Mesen](https://github.com/SourMesen/Mesen2)**
 - **[Higan](https://github.com/higan-emu/higan)**
 
-And a special thanks to **[AccuracyCoin](https://github.com/100thCoin/AccuracyCoin/tree/main)**, which assisted greatly with compatibility through accuracy testing and accuracy implementation.
+- **[WebNES](https://github.com/peteward44/WebNES)**
+- **[JSNES](https://github.com/bfirsh/jsnes)**
+
+And a special thanks to **[AccuracyCoin](https://github.com/100thCoin/AccuracyCoin/tree/main)**, which assisted greatly with game compatibility through accuracy testing and accuracy implementation.
 
 ## Compatibility Notes
 
 If you want to make any improvements, please take a look at the **TECHNICAL.md** document and give it a whirl! Currently, there is no native or intentional support for homebrew. This focuses on commercial releases.
 
-There are about 14 incompatible games that I know of:
+There are about 15 games with compatibility issues that I know of:
 
-| Mapper           |               Game               | Notes                                         |
-| ---------------- | :------------------------------: | --------------------------------------------- |
-| Mapper 7 (AxROM) |          Super Off-Road          | Freezes on game load                          |
-| Mapper 4 (MMC3)  |       Adventures of Lolo 2       | Freezes after pressing start title screen     |
-| Mapper 4 (MMC3)  |      Bram Stoker's Dracula       | Game doesn't start                            |
-| Mapper 4 (MMC3)  |          Burai Fighter           |                                               |
-| Mapper 4 (MMC3)  |             G.I. Joe             | Freezes shortly after entering game play area |
-| Mapper 4 (MMC3)  |  Golgo 13: The Mafat Conspiracy  | Graphical artifacts / Glitchy                 |
-| Mapper 4 (MMC3)  |            Home Alone            | Game doesn't start                            |
-| Mapper 4 (MMC3)  |     Disney's The Jungle Book     |                                               |
-| Mapper 4 (MMC3)  |           Kick Master            |                                               |
-| Mapper 4 (MMC3)  |        Krusty's Fun House        |                                               |
-| Mapper 4 (MMC3)  |       Legacy of the Wizard       |                                               |
-| Mapper 4 (MMC3)  | Mickey's Adventure in Numberland |                                               |
-| Mapper 4 (MMC3)  |  Mickey's Safari in Letterland   |                                               |
-| Mapper 4 (MMC3)  |   Star Trek: 25th Anniversary    |                                               |
+| No   | Mapper           |               Game               | Notes                                         |
+| :--: | ---------------- | :------------------------------: | --------------------------------------------- |
+| 1    | Mapper 7 (AxROM) |          Super Off-Road          | Freezes on game load                          |
+| 2    | Mapper 4 (MMC3)  |       Adventures of Lolo 2       | Freezes after pressing start title screen     |
+| 3    | Mapper 4 (MMC3)  |      Bram Stoker's Dracula       | Game doesn't start                            |
+| 4    | Mapper 4 (MMC3)  |          Burai Fighter           |                                               |
+| 5    | Mapper 4 (MMC3)  |             G.I. Joe             | Freezes shortly after entering game play area |
+| 6    | Mapper 4 (MMC3)  |  Golgo 13: The Mafat Conspiracy  | Graphical artifacts / Glitchy                 |
+| 7    | Mapper 4 (MMC3)  |            Home Alone            | Game doesn't start                            | 
+| 8    | Mapper 4 (MMC3)  |     Disney's The Jungle Book     |                                               |
+| 9    | Mapper 4 (MMC3)  |           Kick Master            |                                               |
+| 10   | Mapper 4 (MMC3)  |        Krusty's Fun House        |                                               |
+| 11   | Mapper 4 (MMC3)  |       Legacy of the Wizard       |                                               |
+| 12   | Mapper 4 (MMC3)  | Mickey's Adventure in Numberland |                                               |
+| 13   | Mapper 4 (MMC3)  |  Mickey's Safari in Letterland   |                                               |
+| 14   | Mapper 4 (MMC3)  |   Star Trek: 25th Anniversary    | Graphical artifacts / Glitchy                 |
+| 15   | Mapper 1 (MMC1)  |           Air Fortress           | Game doesn't start                            |
 
 ## License
 
