@@ -167,7 +167,7 @@ And a special thanks to **[AccuracyCoin](https://github.com/100thCoin/AccuracyCo
 
 ## Compatibility Notes
 
-If you want to make any improvements, please take a look at the **TECHNICAL.md** document and give it a whirl! Currently, there is no native or intentional support for homebrew. This release focuses on commercial releases.
+If you want to make any improvements, please take a look at the **[ARCHITECTURE.md](https://github.com/Ant0ni00x/ai-NES/blob/main/ARCHITECTURE.md)** and  **[TECHNICAL.md](https://github.com/Ant0ni00x/ai-NES/blob/main/TECHNICAL.md)** documents and give it a whirl! Currently, there is no native or intentional support for homebrew. This release focuses on commercial releases.
 
 There are about 15 games with compatibility issues that I know of:
 
