@@ -160,7 +160,6 @@ Thanks to the creators of various reference emulators. Extremely valuable for th
 
 - **[Mesen](https://github.com/SourMesen/Mesen2)**
 - **[Higan](https://github.com/higan-emu/higan)**
-
 - **[WebNES](https://github.com/peteward44/WebNES)**
 - **[JSNES](https://github.com/bfirsh/jsnes)**
 
