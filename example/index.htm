@@ -25,15 +25,19 @@
     </div>
 
     <div class="controls-bar">
+        <div class="load-rom-control">
+            <input type="file" id="rom-file" accept=".nes" hidden>
+            <button id="btn-load-rom" class="load-rom-btn" title="Load ROM from file">Load ROM</button>
+        </div>
         <div class="volume-control">
             <div id="gamepadStatus" class="disconnected">Gamepad: Not connected</div>
             <div class="volume-row">
-                <label for="volume">Volume</label>
+                <label for="volume">Vol</label>
                 <input type="range" id="volume" min="0" max="100" value="50">
             </div>
         </div>
     </div>
-
+    
     <!---
     <div class="audio-toggles">
         <div class="audio-label">Audio Solo</div>
@@ -85,14 +89,15 @@
             <span class="key">A</span>
             <br />
             <span class="key-label">Button A</span>
-        </div>
+        </div>       
     </div>
 
     <div id="status">
         <div class="info">🎮 Initializing ...</div>
         <div class="success">✓ NES Modules Loaded Successfully</div>
     </div>
-
+    
     <script src="nes.min.js"></script>
+    
 </body>
 </html>
