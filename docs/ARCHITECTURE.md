@@ -95,9 +95,20 @@ This ensures that if a game writes to a PPU register or mapper address mid-instr
 
 Audio is handled on a dedicated thread using the `AudioWorklet` API, preventing UI jank or garbage collection pauses from causing audio glitches.
 
-- **Ring Buffer:** The worklet keeps an 8192-sample circular buffer for each channel.
-- **Batching:** The main thread batches 2048 samples before posting to the worklet.
-- **Fallback:** ScriptProcessor runs at 512-frame blocks with a matching circular buffer.
+- **Ring Buffer:** The worklet keeps a 16384-sample circular buffer for each channel (power of two).
+- **Batching:** The main thread batches 4096 samples before posting to the worklet.
+- **Target Queue:** The main loop tracks queued samples using `audioCtx.currentTime` and keeps roughly 80ms of audio buffered, topping up with a few extra frames when needed to avoid underruns.
+- **Prefill:** On boot, a short prefill warms the queue before playback starts to prevent startup crackles.
+- **Latency Hint:** The `AudioContext` uses `latencyHint: 'playback'` to favor stability over minimal latency.
+
+### Audio Queue Flow (Simplified)
+
+```text
+APU sample() -> batch (4096) -> postMessage -> AudioWorklet ring (16384)
+        ^                                  |
+        |                                  v
+    queue estimator <--- currentTime <--- output mix -> destination
+```
 
 ## 4. Expansion Audio Mixing
 
