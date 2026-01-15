@@ -1,4 +1,4 @@
-ai-NES - Modernized JavaScript NES Emulator
+## ai-NES - Modernized JavaScript NES Emulator
 
 A modernized Nintendo Entertainment System (NES) emulator written in JavaScript. This project focuses on **accuracy, maintainability, and clean architecture**, with particular emphasis on correct mapper behavior and long-term extensibility.
 
