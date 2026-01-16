@@ -213,7 +213,7 @@ This emulator does not include any copyrighted ROM files. You must provide your 
 
 There is a way to demo ai-NES on the site! You just have to find it!
 
-![Play Games!](https://8bitage.com/public/images/gotw-demo.png)
+[![Press Start!](https://8bitage.com/public/images/gotw-demo-01.png)](https://8bitage.com)
 
 ## Support
 
