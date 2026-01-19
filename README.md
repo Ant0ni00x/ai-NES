@@ -202,6 +202,13 @@ There are about 15 games with compatibility issues that I know of:
 | 14   | Mapper 4 (MMC3)  |   Star Trek: 25th Anniversary    | Graphical artifacts / Glitchy                 |
 | 15   | Mapper 1 (MMC1)  |           Air Fortress           | Game doesn't start                            |
 
+## Easter Eggs
+
+For a nostalgia-kick - somewhere on the page is a way to run ai-NES to play your favorite games! You just have to be curious and explore the page!
+
+![ai-NES Play!](https://8bitage.com/public/images/gotw-demo-01.png)
+
+
 ## License
 
 This project is licensed under the GPL v3 license.
