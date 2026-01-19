@@ -1,4 +1,4 @@
-# NES Emulator Visual Filters Guide
+# ai-NES Emulator Visual Filters Guide
 
 This guide explains how to customize the visual appearance of the NES emulator by adjusting CSS filters, scanlines, and CRT effects.
 
