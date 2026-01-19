@@ -1,6 +1,6 @@
-# AI-NES Technical Documentation
+# ai-NES Technical Documentation
 
-This document covers the internal architecture and key implementation details of the AI-NES emulator, with emphasis on **correct hardware modeling** and the **capability-driven mapper system**.
+This document covers the internal architecture and key implementation details of the ai-NES emulator, with emphasis on **correct hardware modeling** and the **capability-driven mapper system**.
 
 ## Table of Contents
 
