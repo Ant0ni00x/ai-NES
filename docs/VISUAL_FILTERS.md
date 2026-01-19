@@ -430,6 +430,6 @@ canvas {
 ---
 
 **Last Updated:** January 2026
-**Emulator Version:** AI-NES v1.0
+**Emulator Version:** ai-NES v1.0
 **Palette Brightness:** 1.2x (20% boost)
 **Default Canvas Filter:** `contrast(1.1) brightness(1.05)`
