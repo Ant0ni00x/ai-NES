@@ -460,10 +460,8 @@ export class PPU {
 
     const attrByte = this.vramMem[this.mirrorAddress(attrAddr)];
 
-    // Select 2 bits based on quadrant
-    const shift =
-      ((coarseY & 0x02) ? 4 : 0) |
-      ((coarseX & 0x02) ? 2 : 0);
+    // Select 2 bits based on quadrant (bit ops instead of ternary)
+    const shift = ((coarseY << 1) & 0x04) | (coarseX & 0x02);
 
     return (attrByte >> shift) & 0x03;
   }
@@ -636,7 +634,7 @@ export class PPU {
   renderBackgroundPixel() {
     const x = this.cycle - 1;
     const y = this.scanline;
-    const idx = y * 256 + x;
+    const idx = (y << 8) + x;
 
     // If background disabled, just draw backdrop color
     if ((this.mask & 0x08) === 0) {
@@ -698,7 +696,7 @@ export class PPU {
 renderPixel() {
   const x = this.cycle - 1;
   const y = this.scanline;
-  const idx = y * 256 + x;
+  const idx = (y << 8) + x;
 
   if (x < 0 || x >= 256) return;   // safety
 
@@ -710,7 +708,7 @@ renderPixel() {
     if (this.mask & 0x01) {
       backdrop &= 0x30;
     }
-      this.framebuffer[y * 256 + x] = this.nes.palTable ? this.nes.palTable.getEntry(backdrop) : 0;
+      this.framebuffer[(y << 8) + x] = this.nes.palTable ? this.nes.palTable.getEntry(backdrop) : 0;
     return;
   }
 
@@ -1036,7 +1034,7 @@ renderPixel() {
       if ((this.cycle >= 1 && this.cycle <= 256) || (this.cycle >= 321 && this.cycle <= 336)) {
 
         // 8-cycle tile fetch pattern
-        const fetchCycle = this.cycle % 8;
+        const fetchCycle = this.cycle & 7;
 
         switch (fetchCycle) {
           case 1:
@@ -1049,17 +1047,19 @@ renderPixel() {
             this.bgAttrByte = this.fetchAttributeByte();
             break;
 
-          case 5:
+          case 5: {
             // Fetch pattern table low byte
             const fineY = (this.v >> 12) & 0x07;
             this.bgTileLow = this.fetchBgPatternLow(this.bgTileIndex, fineY);
             break;
+          }
 
-          case 7:
+          case 7: {
             // Fetch pattern table high byte
-            const fineY2 = (this.v >> 12) & 0x07;
-            this.bgTileHigh = this.fetchBgPatternHigh(this.bgTileIndex, fineY2);
+            const fineY = (this.v >> 12) & 0x07;
+            this.bgTileHigh = this.fetchBgPatternHigh(this.bgTileIndex, fineY);
             break;
+          }
 
           case 0:
             // Load shift registers with fetched tile data
@@ -1071,9 +1071,10 @@ renderPixel() {
             // bgAttrByte is already the 2-bit palette index (0-3) from fetchAttributeByte()
             const paletteBits = this.bgAttrByte;
 
-            // Replicate palette bits across 8 pixels
-            const newAttrLow = (this.bgAttrShiftLow & 0xFF00) | ((paletteBits & 1) ? 0xFF : 0x00);
-            const newAttrHigh = (this.bgAttrShiftHigh & 0xFF00) | ((paletteBits & 2) ? 0xFF : 0x00);
+            // Replicate palette bits across 8 pixels (bit ops instead of ternary)
+            // -(x & 1) produces 0xFFFFFFFF (-1) if bit is set, 0 otherwise
+            const newAttrLow = (this.bgAttrShiftLow & 0xFF00) | (-(paletteBits & 1) & 0xFF);
+            const newAttrHigh = (this.bgAttrShiftHigh & 0xFF00) | (-((paletteBits >> 1) & 1) & 0xFF);
 
             this.bgAttrShiftLow = newAttrLow;
             this.bgAttrShiftHigh = newAttrHigh;
@@ -1193,7 +1194,7 @@ renderPixel() {
       // Read the byte that is treated as Y-coordinate.
       // Normally OAM[n*4 + 0].
       // Due to the hardware bug, if count >= 8, m might be 1, 2, or 3.
-      const val = this.oam[n * 4 + m];
+      const val = this.oam[(n << 2) + m];
 
       // Check if sprite is in range for the next scanline
       // Sprite Y is the top line. It appears on Y+1.
@@ -1203,9 +1204,9 @@ renderPixel() {
       if (count < 8) {
         if (inRange) {
           // Found a visible sprite, copy to secondary OAM
-          const dest = count * 4;
-          const src = n * 4;
-          this.secondaryOAM[dest + 0] = this.oam[src + 0];
+          const dest = count << 2;
+          const src = n << 2;
+          this.secondaryOAM[dest] = this.oam[src];
           this.secondaryOAM[dest + 1] = this.oam[src + 1];
           this.secondaryOAM[dest + 2] = this.oam[src + 2];
           this.secondaryOAM[dest + 3] = this.oam[src + 3];
@@ -1251,8 +1252,8 @@ renderPixel() {
       let validSprite = (i < this.spriteCount);
 
       if (validSprite) {
-        const base = i * 4;
-        const spriteY = this.secondaryOAM[base + 0];
+        const base = i << 2;
+        const spriteY = this.secondaryOAM[base];
         tileIndex = this.secondaryOAM[base + 1];
         attributes = this.secondaryOAM[base + 2];
         spriteX = this.secondaryOAM[base + 3];
