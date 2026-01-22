@@ -31,7 +31,7 @@ export default class Mapper004 extends Mapper {
         // Soft Reset: MMC3 registers are NOT cleared.
         // IRQ counter is not affected by reset.
         // We only ensure the fixed bank is correct, just in case.
-        this.prgOffsets[3] = (this.get8kPrgBankCount() - 1) * 0x2000;
+        this.prgOffsets[3] = (this.get8kPrgBankCount() - 1) << 13; // << 13 = * 0x2000
     }
 
     loadROM() {
@@ -171,42 +171,42 @@ export default class Mapper004 extends Mapper {
     }
 
     updateBanks() {
-        // CHR Banks
+        // CHR Banks (<< 10 = * 0x400 for 1KB banks)
         const chrMask = (this.get1kChrBankCount() > 0) ? this.get1kChrBankCount() - 1 : 0;
         if (this.chrMode === 0) {
-            this.chrOffsets[0] = ((this.reg[0] & 0xFE) & chrMask) * 0x400;
-            this.chrOffsets[1] = ((this.reg[0] | 0x01) & chrMask) * 0x400;
-            this.chrOffsets[2] = ((this.reg[1] & 0xFE) & chrMask) * 0x400;
-            this.chrOffsets[3] = ((this.reg[1] | 0x01) & chrMask) * 0x400;
-            this.chrOffsets[4] = (this.reg[2] & chrMask) * 0x400;
-            this.chrOffsets[5] = (this.reg[3] & chrMask) * 0x400;
-            this.chrOffsets[6] = (this.reg[4] & chrMask) * 0x400;
-            this.chrOffsets[7] = (this.reg[5] & chrMask) * 0x400;
+            this.chrOffsets[0] = ((this.reg[0] & 0xFE) & chrMask) << 10;
+            this.chrOffsets[1] = ((this.reg[0] | 0x01) & chrMask) << 10;
+            this.chrOffsets[2] = ((this.reg[1] & 0xFE) & chrMask) << 10;
+            this.chrOffsets[3] = ((this.reg[1] | 0x01) & chrMask) << 10;
+            this.chrOffsets[4] = (this.reg[2] & chrMask) << 10;
+            this.chrOffsets[5] = (this.reg[3] & chrMask) << 10;
+            this.chrOffsets[6] = (this.reg[4] & chrMask) << 10;
+            this.chrOffsets[7] = (this.reg[5] & chrMask) << 10;
         } else {
-            this.chrOffsets[0] = (this.reg[2] & chrMask) * 0x400;
-            this.chrOffsets[1] = (this.reg[3] & chrMask) * 0x400;
-            this.chrOffsets[2] = (this.reg[4] & chrMask) * 0x400;
-            this.chrOffsets[3] = (this.reg[5] & chrMask) * 0x400;
-            this.chrOffsets[4] = ((this.reg[0] & 0xFE) & chrMask) * 0x400;
-            this.chrOffsets[5] = ((this.reg[0] | 0x01) & chrMask) * 0x400;
-            this.chrOffsets[6] = ((this.reg[1] & 0xFE) & chrMask) * 0x400;
-            this.chrOffsets[7] = ((this.reg[1] | 0x01) & chrMask) * 0x400;
+            this.chrOffsets[0] = (this.reg[2] & chrMask) << 10;
+            this.chrOffsets[1] = (this.reg[3] & chrMask) << 10;
+            this.chrOffsets[2] = (this.reg[4] & chrMask) << 10;
+            this.chrOffsets[3] = (this.reg[5] & chrMask) << 10;
+            this.chrOffsets[4] = ((this.reg[0] & 0xFE) & chrMask) << 10;
+            this.chrOffsets[5] = ((this.reg[0] | 0x01) & chrMask) << 10;
+            this.chrOffsets[6] = ((this.reg[1] & 0xFE) & chrMask) << 10;
+            this.chrOffsets[7] = ((this.reg[1] | 0x01) & chrMask) << 10;
         }
 
-        // PRG Banks
+        // PRG Banks (<< 13 = * 0x2000 for 8KB banks)
         const prgMask = (this.get8kPrgBankCount() > 0) ? this.get8kPrgBankCount() - 1 : 0;
         if (this.prgMode === 0) {
-            this.prgOffsets[0] = (this.reg[6] & prgMask) * 0x2000;
-            this.prgOffsets[1] = (this.reg[7] & prgMask) * 0x2000;
-            this.prgOffsets[2] = (this.get8kPrgBankCount() - 2) * 0x2000;
+            this.prgOffsets[0] = (this.reg[6] & prgMask) << 13;
+            this.prgOffsets[1] = (this.reg[7] & prgMask) << 13;
+            this.prgOffsets[2] = (this.get8kPrgBankCount() - 2) << 13;
         } else {
-            this.prgOffsets[0] = (this.get8kPrgBankCount() - 2) * 0x2000;
-            this.prgOffsets[1] = (this.reg[7] & prgMask) * 0x2000;
-            this.prgOffsets[2] = (this.reg[6] & prgMask) * 0x2000;
+            this.prgOffsets[0] = (this.get8kPrgBankCount() - 2) << 13;
+            this.prgOffsets[1] = (this.reg[7] & prgMask) << 13;
+            this.prgOffsets[2] = (this.reg[6] & prgMask) << 13;
         }
-        
+
         // $E000 is always fixed to the last bank
-        this.prgOffsets[3] = (this.get8kPrgBankCount() - 1) * 0x2000;
+        this.prgOffsets[3] = (this.get8kPrgBankCount() - 1) << 13;
     }
 
     clockScanline() {

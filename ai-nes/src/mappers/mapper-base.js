@@ -15,8 +15,8 @@ export default class Mapper {
 
         // Bank counts (WebNES-style)
         // PRG banks are 8KB each, CHR banks are 1KB each
-        this.prgBankCount = this.prgData ? (this.prgData.length / 0x2000) : 0; // 8KB banks
-        this.chrBankCount = this.chrData ? (this.chrData.length / 0x400) : 0;  // 1KB banks
+        this.prgBankCount = this.prgData ? (this.prgData.length >> 13) : 0; // 8KB banks (>> 13 = / 0x2000)
+        this.chrBankCount = this.chrData ? (this.chrData.length >> 10) : 0;  // 1KB banks (>> 10 = / 0x400)
 
         // Bank mapping arrays (WebNES-style)
         // PRG: 4 slots of 8KB each ($8000-$9FFF, $A000-$BFFF, $C000-$DFFF, $E000-$FFFF)
@@ -28,7 +28,7 @@ export default class Mapper {
         this.prgPagesMap.fill(0);
         // Default CHR mapping (Identity) to support mappers that don't explicitly switch banks (like NROM)
         for (let i = 0; i < 8; i++) {
-            this.chrPagesMap[i] = (this.chrBankCount > 0) ? (i % this.chrBankCount) * 0x400 : 0;
+            this.chrPagesMap[i] = (this.chrBankCount > 0) ? (i % this.chrBankCount) << 10 : 0;
         }
 
         // PRG-RAM (most mappers have 8KB of SRAM at $6000-$7FFF)
@@ -56,7 +56,7 @@ export default class Mapper {
             ram.fill(0xFF);
         } else if (pattern === 'random') {
             for (let i = 0; i < ram.length; i++) {
-                ram[i] = Math.floor(Math.random() * 256);
+                ram[i] = (Math.random() * 256) | 0;
             }
         }
     }
@@ -80,26 +80,26 @@ export default class Mapper {
         // Map an 8KB PRG bank to one of 4 slots
         // slot 0 = $8000-$9FFF, 1 = $A000-$BFFF, 2 = $C000-$DFFF, 3 = $E000-$FFFF
         const actualBank = bankId % this.prgBankCount;
-        this.prgPagesMap[slot] = actualBank * 0x2000; // Store byte offset
+        this.prgPagesMap[slot] = actualBank << 13; // Store byte offset (<< 13 = * 0x2000)
     }
 
     switch16kPrgBank(bankId, lowSlot) {
         // Map a 16KB PRG bank to two consecutive 8KB slots
         // lowSlot true = $8000-$BFFF, false = $C000-$FFFF
         if (this.get16kPrgBankCount() > 0) {
-            const actualBank = (bankId * 2) % this.prgBankCount;
+            const actualBank = (bankId << 1) % this.prgBankCount;
             const slot = lowSlot ? 0 : 2;
-            this.prgPagesMap[slot] = actualBank * 0x2000;
-            this.prgPagesMap[slot + 1] = (actualBank + 1) * 0x2000;
+            this.prgPagesMap[slot] = actualBank << 13;
+            this.prgPagesMap[slot + 1] = (actualBank + 1) << 13;
         }
     }
 
     switch32kPrgBank(bankId) {
         // Map a 32KB PRG bank to all 4 slots
         if (this.get32kPrgBankCount() > 0) {
-            const actualBank = (bankId * 4) % this.prgBankCount;
+            const actualBank = (bankId << 2) % this.prgBankCount;
             for (let i = 0; i < 4; i++) {
-                this.prgPagesMap[i] = (actualBank + i) * 0x2000;
+                this.prgPagesMap[i] = (actualBank + i) << 13;
             }
         }
     }
@@ -108,15 +108,15 @@ export default class Mapper {
     switch1kChrBank(bankId, slot) {
         // Map a 1KB CHR bank to one of 8 slots
         const actualBank = bankId % this.chrBankCount;
-        this.chrPagesMap[slot] = actualBank * 0x400; // Store byte offset
+        this.chrPagesMap[slot] = actualBank << 10; // Store byte offset (<< 10 = * 0x400)
     }
 
     switch2kChrBank(bankId, slot) {
         // Map a 2KB CHR bank to two consecutive 1KB slots
         if (this.get2kChrBankCount() > 0) {
-            const actualBank = (bankId * 2) % this.chrBankCount;
-            this.chrPagesMap[slot] = actualBank * 0x400;
-            this.chrPagesMap[slot + 1] = (actualBank + 1) * 0x400;
+            const actualBank = (bankId << 1) % this.chrBankCount;
+            this.chrPagesMap[slot] = actualBank << 10;
+            this.chrPagesMap[slot + 1] = (actualBank + 1) << 10;
         }
     }
 
@@ -124,10 +124,10 @@ export default class Mapper {
         // Map a 4KB CHR bank to four consecutive 1KB slots
         // lowSlot true = $0000-$0FFF, false = $1000-$1FFF
         if (this.get4kChrBankCount() > 0) {
-            const actualBank = (bankId * 4) % this.chrBankCount;
+            const actualBank = (bankId << 2) % this.chrBankCount;
             const slot = lowSlot ? 0 : 4;
             for (let i = 0; i < 4; i++) {
-                this.chrPagesMap[slot + i] = (actualBank + i) * 0x400;
+                this.chrPagesMap[slot + i] = (actualBank + i) << 10;
             }
         }
     }
@@ -135,9 +135,9 @@ export default class Mapper {
     switch8kChrBank(bankId) {
         // Map an 8KB CHR bank to all 8 slots
         if (this.get8kChrBankCount() > 0) {
-            const actualBank = (bankId * 8) % this.chrBankCount;
+            const actualBank = (bankId << 3) % this.chrBankCount;
             for (let i = 0; i < 8; i++) {
-                this.chrPagesMap[i] = (actualBank + i) * 0x400;
+                this.chrPagesMap[i] = (actualBank + i) << 10;
             }
         }
     }
@@ -146,14 +146,15 @@ export default class Mapper {
     useVRAM(numBanks = 8) {
         // Allocate CHR-RAM instead of using CHR-ROM
         this.usingChrRam = true;
-        this.chrData = new Uint8Array(0x400 * numBanks); // numBanks x 1KB
+        this.chrData = new Uint8Array(numBanks << 10); // numBanks x 1KB (<< 10 = * 0x400)
         this.chrRam = this.chrData; // Alias for compatibility
         this.chrBankCount = numBanks;
         this.fillRam(this.chrRam);
 
         // Initialize CHR page map
-        for (let i = 0; i < Math.min(8, numBanks); i++) {
-            this.chrPagesMap[i] = i * 0x400;
+        const limit = numBanks < 8 ? numBanks : 8;
+        for (let i = 0; i < limit; i++) {
+            this.chrPagesMap[i] = i << 10;
         }
     }
 
