@@ -40,7 +40,7 @@ export class CPU {
         break;
       case 'random':
         for (let i = 0; i < 0x2000; i++) {
-          this.mem[i] = Math.floor(Math.random() * 256);
+          this.mem[i] = (Math.random() * 256) | 0;
         }
         break;
     }
@@ -119,7 +119,7 @@ export class CPU {
             // Check if the beam (dot) is within horizontal range of the sensor
             if (currentX >= 0 && currentX < 256 && Math.abs(currentX - zapper.x) <= radius) {
                 // Check brightness of the pixel CURRENTLY being drawn by the beam
-                const pixel = ppu.framebuffer[ppu.scanline * 256 + currentX];
+                const pixel = ppu.framebuffer[(ppu.scanline << 8) + currentX];
                 const r = (pixel >> 16) & 0xFF;
                 const g = (pixel >> 8) & 0xFF;
                 const b = pixel & 0xFF;
@@ -347,7 +347,7 @@ export class CPU {
     let branchCycles = 0;
 
     switch (instructionType) {
-      case 0: val = this.cpuRead(addr); temp = this.REG_ACC + val + this.F_CARRY; this.F_OVERFLOW = ((this.REG_ACC ^ val) & 0x80) === 0 && ((this.REG_ACC ^ temp) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp > 255 ? 1 : 0; this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp & 0xff; this.REG_ACC = temp & 0xff; break;
+      case 0: val = this.cpuRead(addr); temp = this.REG_ACC + val + this.F_CARRY; this.F_OVERFLOW = ((this.REG_ACC ^ val) & 0x80) === 0 && ((this.REG_ACC ^ temp) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp > 255 ? 1 : 0; this.F_SIGN = (temp >> 7) & 1; temp &= 0xff; this.F_ZERO = temp; this.REG_ACC = temp; break;
       case 1: this.REG_ACC &= this.cpuRead(addr); this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break;
       case 2: if (addrMode === 4) { this.F_CARRY = (this.REG_ACC >> 7) & 1; this.REG_ACC = (this.REG_ACC << 1) & 0xff; this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; } else { temp = this.cpuRead(addr); this.cpuWrite(addr, temp); this.F_CARRY = (temp >> 7) & 1; temp = (temp << 1) & 0xff; this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp; this.cpuWrite(addr, temp); } break;
       case 3: if (this.F_CARRY === 0) { branchCycles = ((this.REG_PC + 1) & 0xff00) !== (addr & 0xff00) ? 2 : 1; this.REG_PC = addr - 1; } break;
@@ -414,7 +414,7 @@ export class CPU {
       case 42: // RTS
         this.REG_PC = this.pull() | (this.pull() << 8);
         break;
-      case 43: val = this.cpuRead(addr); temp = this.REG_ACC - val - (1 - this.F_CARRY); this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp & 0xff; this.F_OVERFLOW = ((this.REG_ACC ^ temp) & 0x80) !== 0 && ((this.REG_ACC ^ val) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp < 0 ? 0 : 1; this.REG_ACC = temp & 0xff; break;
+      case 43: val = this.cpuRead(addr); temp = this.REG_ACC - val - (1 - this.F_CARRY); this.F_SIGN = (temp >> 7) & 1; this.F_OVERFLOW = ((this.REG_ACC ^ temp) & 0x80) !== 0 && ((this.REG_ACC ^ val) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp >= 0 ? 1 : 0; temp &= 0xff; this.F_ZERO = temp; this.REG_ACC = temp; break;
       case 44: this.F_CARRY = 1; break;
       case 45: this.F_DECIMAL = 1; break;
       case 46: this.F_INTERRUPT = 1; break;
@@ -436,9 +436,9 @@ export class CPU {
       case 60: this.REG_ACC = this.REG_X = this.F_ZERO = this.cpuRead(addr); this.F_SIGN = (this.REG_ACC >> 7) & 1; break;
       case 61: this.cpuWrite(addr, this.REG_ACC & this.REG_X); break;
       case 62: val = this.cpuRead(addr); this.cpuWrite(addr, val); temp = (val - 1) & 0xff; this.cpuWrite(addr, temp); temp = this.REG_ACC - temp; this.F_CARRY = temp >= 0 ? 1 : 0; this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp & 0xff; break; // DCP
-      case 63: val = this.cpuRead(addr); this.cpuWrite(addr, val); temp = (val + 1) & 0xff; this.cpuWrite(addr, temp); val = temp; temp = this.REG_ACC - val - (1 - this.F_CARRY); this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp & 0xff; this.F_OVERFLOW = ((this.REG_ACC ^ temp) & 0x80) !== 0 && ((this.REG_ACC ^ val) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp < 0 ? 0 : 1; this.REG_ACC = temp & 0xff; break; // ISC
+      case 63: val = this.cpuRead(addr); this.cpuWrite(addr, val); temp = (val + 1) & 0xff; this.cpuWrite(addr, temp); val = temp; temp = this.REG_ACC - val - (1 - this.F_CARRY); this.F_SIGN = (temp >> 7) & 1; this.F_OVERFLOW = ((this.REG_ACC ^ temp) & 0x80) !== 0 && ((this.REG_ACC ^ val) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp >= 0 ? 1 : 0; temp &= 0xff; this.F_ZERO = temp; this.REG_ACC = temp; break; // ISC
       case 64: val = this.cpuRead(addr); this.cpuWrite(addr, val); add = this.F_CARRY; this.F_CARRY = (val >> 7) & 1; temp = ((val << 1) & 0xff) + add; this.cpuWrite(addr, temp); this.REG_ACC &= temp; this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break; // RLA
-      case 65: val = this.cpuRead(addr); this.cpuWrite(addr, val); add = this.F_CARRY << 7; this.F_CARRY = val & 1; temp = (val >> 1) + add; this.cpuWrite(addr, temp); val = temp; temp = this.REG_ACC + val + this.F_CARRY; this.F_OVERFLOW = ((this.REG_ACC ^ val) & 0x80) === 0 && ((this.REG_ACC ^ temp) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp > 255 ? 1 : 0; this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp & 0xff; this.REG_ACC = temp & 0xff; break; // RRA
+      case 65: val = this.cpuRead(addr); this.cpuWrite(addr, val); add = this.F_CARRY << 7; this.F_CARRY = val & 1; temp = (val >> 1) + add; this.cpuWrite(addr, temp); val = temp; temp = this.REG_ACC + val + this.F_CARRY; this.F_OVERFLOW = ((this.REG_ACC ^ val) & 0x80) === 0 && ((this.REG_ACC ^ temp) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp > 255 ? 1 : 0; this.F_SIGN = (temp >> 7) & 1; temp &= 0xff; this.F_ZERO = temp; this.REG_ACC = temp; break; // RRA
       case 66: val = this.cpuRead(addr); this.cpuWrite(addr, val); this.F_CARRY = (val >> 7) & 1; temp = (val << 1) & 0xff; this.cpuWrite(addr, temp); this.REG_ACC |= temp; this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break; // SLO
       case 67: val = this.cpuRead(addr); this.cpuWrite(addr, val); this.F_CARRY = val & 1; temp = val >> 1; this.cpuWrite(addr, temp); this.REG_ACC ^= temp; this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break; // SRE
       case 69: this.cpuRead(addr); break;
