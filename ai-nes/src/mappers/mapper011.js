@@ -4,6 +4,7 @@
 // Features:
 //   - 32KB PRG bank switching
 //   - 8KB CHR bank switching
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/Color_Dreams
 

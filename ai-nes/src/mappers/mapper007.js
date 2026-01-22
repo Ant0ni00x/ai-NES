@@ -4,6 +4,7 @@
 // Features:
 //   - 32KB PRG bank switching
 //   - 1KB VRAM page switching for nametables (Single Screen Mirroring)
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/AxROM
  

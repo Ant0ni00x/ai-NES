@@ -1,10 +1,12 @@
-// Mapper 206: DxROM (Namco 108) Mapper (Mapper 206)
-// Extension mapper chip based on MMC3 but with differences in IRQ and bank switching
+// Mapper 206: DxROM - Extension mapper chip based on MMC3 but with differences in IRQ and bank switching
 // Used by: Gauntlet
 //
 // Features:
 //   - MMC3-based bank switching
 //   - No Scanline IRQ
+//   - PRG Mode 0 and CHR Mode 0 fixed
+//   - PRG-RAM disabled
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/DxROM
 
@@ -75,4 +77,3 @@ export default class Mapper206 extends Mapper004 {
         }
     }
 }
-

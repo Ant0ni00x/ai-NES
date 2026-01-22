@@ -1,10 +1,12 @@
 // Mapper 004: (MMC3)
 // Used by: Super Mario Bros. 3, Kirby's Adventure
+//
 // Features:
 //   - Complex PRG/CHR bank switching
 //   - Scanline-based IRQ counter
 //   - PRG-RAM with write protection
 //   - Switchable mirroring
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/MMC3
 

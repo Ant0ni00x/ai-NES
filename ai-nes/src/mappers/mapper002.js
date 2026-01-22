@@ -5,6 +5,7 @@
 //   - 16KB PRG bank switching at $8000-$BFFF
 //   - Fixed 16KB PRG bank at $C000-$FFFF (last bank)
 //   - Uses CHR-RAM (8KB) instead of CHR-ROM
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/UNROM
 

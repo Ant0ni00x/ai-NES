@@ -1,15 +1,18 @@
 // Mapper 005: MMC5 (HVC-ExROM)
-// Based on higan MMC5 reference implementation.
 //
 // Features:
 //   - PRG banking modes (8/16/32KB)
 //   - CHR banking modes (1/2/4/8KB) with separate BG/Sprite banks
-//   - ExRAM nametable override / extended attributes / fill mode
+//   - 1KB ExRAM for nametable and attribute data / fill mode
 //   - Split screen control
 //   - Scanline IRQ + multiplier
+//   - PCM audio playback
+//   - PRG-RAM up to 64KB with write protection
+//
 // Notes:
 //   - MMC5 audio is mixed via an external expansion audio module.
 //   - Split timing is approximated using PPU scanline/cycle.
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/MMC5
 

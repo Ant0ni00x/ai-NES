@@ -4,6 +4,7 @@
 // Features:
 //   - 32KB PRG bank switching
 //   - (NINA-001 only) 2x 4KB CHR bank switching
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/BNROM
 //   - https://wiki.nesdev.com/w/index.php/NINA-001

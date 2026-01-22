@@ -5,6 +5,8 @@
 //   - PRG-ROM: 8KB switchable banks
 //   - CHR-ROM: 4KB switchable banks with Latch mechanism
 //   - Latch: Reading specific tiles ($FD/$FE) switches the CHR bank for that pattern table
+//  - Mirroring control via CPU writes
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/MMC2
 

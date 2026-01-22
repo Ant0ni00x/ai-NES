@@ -1,9 +1,10 @@
 // Mapper 003: (CNROM)
-// Used by: Chase H.Q., Mighty Bomb Jack, Super Spike V'Ball
+// Used by: Chase H.Q., Super Spike V'Ball
 //
 // Features:
 //   - 32KB PRG bank (fixed)
 //   - 8KB CHR bank switching
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/CNROM
 

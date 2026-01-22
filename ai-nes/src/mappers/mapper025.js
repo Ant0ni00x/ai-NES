@@ -5,7 +5,8 @@
 //   - 8-bit CHR bank registers (up to 256KB CHR)
 //   - Fixed last/second-last PRG banks with swap mode
 //   - Horizontal, vertical and 1-screen mirroring.
-//   - IRQ device 
+//   - IRQ device
+//
 // References:
 //   - https://www.nesdev.org/wiki/VRC2_and_VRC4
 

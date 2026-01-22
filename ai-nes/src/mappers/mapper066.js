@@ -4,6 +4,7 @@
 // Features:
 //   - PRG-ROM: 32KB switchable banks
 //   - CHR-ROM: 8KB switchable banks
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/GxROM
 

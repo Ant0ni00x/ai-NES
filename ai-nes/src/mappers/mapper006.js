@@ -5,6 +5,7 @@
 //   - Extension of MMC3
 //   - 1KB internal PRG-RAM at $7000-$73FF (mirrored at $7400-$7FFF)
 //   - Unique WRAM protection via $A001 (bits 4-7 control read/write for each 512B half)
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/MMC6
 

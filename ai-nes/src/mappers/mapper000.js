@@ -1,11 +1,12 @@
 // Mapper 000: (NROM)
-// Used by: Donkey Kong, Super Mario Bros, Excitebike, etc.
+// Used by: Donkey Kong, Super Mario Bros.
 //
 // Features:
 //   - Fixed PRG and CHR banks (no bank switching)
-//   - PRG-ROM: 16KB or 32KB
-//   - PRG-RAM: 8KB optional
+//   - PRG-ROM: 16KB or 32KB - PRG-RAM: 8KB optional
 //   - CHR-ROM: 8KB or none (uses CHR-RAM if none)
+//   - Mirroring: Horizontal or Vertical as per ROM header
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/NROM
 

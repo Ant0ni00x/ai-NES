@@ -1,11 +1,12 @@
 // Mapper 001: (MMC1)
-// Used by: Legend of Zelda, Metroid, Dragon Warrior, Final Fantasy, etc.
+// Used by: Legend of Zelda, Metroid, etc.
 //
 // Features:
 //   - PRG-ROM banking (16KB or 32KB modes)
 //   - CHR-ROM/RAM banking (4KB or 8KB modes)
 //   - PRG-RAM with optional battery backup
 //   - Programmable mirroring
+//
 // References:
 //   - https://wiki.nesdev.com/w/index.php/MMC1
 

@@ -4,6 +4,7 @@
 // Features:
 //   - PRG and CHR ROM into two 128KB blocks. 
 //   - Register at $6000 select the active block.
+//
 // References:
 //   - https://www.nesdev.org/wiki/INES_Mapper_047
 

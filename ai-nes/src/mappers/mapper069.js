@@ -6,8 +6,11 @@
 //   - 1KB CHR bank switching
 //   - Banked RAM/ROM mapping at $6000-$7FFF
 //   - 16-bit CPU cycle IRQ counter
+//   - Sunsoft 5B audio registers at $C000/$E000
+//
 // Notes:
 //   - Sunsoft 5B audio is not emulated; register writes are tracked only.
+//
 // References:
 //   - https://www.nesdev.org/wiki/Sunsoft_FME-7
 
