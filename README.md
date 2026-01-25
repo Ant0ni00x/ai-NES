@@ -206,7 +206,7 @@ There are about 15 games with compatibility issues that I know of:
 
 For a nostalgia-kick - somewhere on the page is a way to run ai-NES to play your favorite games! You just have to be curious and explore the page!
 
-![ai-NES Play!](https://8bitage.com/public/images/gotw-demo-01.png)
+[![ai-NES Play](https://8bitage.com/public/images/gotw-demo-01.png)](https://8bitage.com)
 
 
 ## License
