@@ -32,15 +32,45 @@ let batchPos = 0;
 let emulationRunning = false;
 let fastForward = false;
 
-// Gamepad
-let gamepadIndex = null;
-const gamepadState = new Array(16).fill(false);
+// Gamepad - support for 2 players
+const gamepadIndices = [null, null]; // [player1, player2]
+const gamepadStates = [
+  new Array(16).fill(false),
+  new Array(16).fill(false)
+];
+const axisStates = [
+  { up: false, down: false, left: false, right: false },
+  { up: false, down: false, left: false, right: false }
+];
+
+// Button mappings for standard controllers
 const GAMEPAD_MAP = {
-  0: Controller.BUTTON_B, 1: Controller.BUTTON_A,
-  2: Controller.BUTTON_A, 3: Controller.BUTTON_B,
-  8: Controller.BUTTON_SELECT, 9: Controller.BUTTON_START,
-  12: Controller.BUTTON_UP, 13: Controller.BUTTON_DOWN,
+  0: Controller.BUTTON_A, 1: Controller.BUTTON_B,      // 8Bitdo N30: A=0, B=1
+  2: Controller.BUTTON_B, 3: Controller.BUTTON_A,      // Standard: X=B, Y=A alt
+  8: Controller.BUTTON_SELECT, 9: Controller.BUTTON_START,   // Standard
+  10: Controller.BUTTON_SELECT, 11: Controller.BUTTON_START, // 8Bitdo N30
+  12: Controller.BUTTON_UP, 13: Controller.BUTTON_DOWN,      // Standard D-pad buttons
   14: Controller.BUTTON_LEFT, 15: Controller.BUTTON_RIGHT
+};
+
+// Axis threshold for D-pad detection
+const AXIS_THRESHOLD = 0.5;
+
+// Keyboard mappings for both players
+const KEYBOARD_MAP_P1 = {
+  38: Controller.BUTTON_UP, 40: Controller.BUTTON_DOWN,       // Arrow keys
+  37: Controller.BUTTON_LEFT, 39: Controller.BUTTON_RIGHT,
+  65: Controller.BUTTON_A, 81: Controller.BUTTON_A,           // A, Q
+  83: Controller.BUTTON_B, 79: Controller.BUTTON_B,           // S, O
+  9: Controller.BUTTON_SELECT, 13: Controller.BUTTON_START    // Tab, Enter
+};
+
+const KEYBOARD_MAP_P2 = {
+  73: Controller.BUTTON_UP, 75: Controller.BUTTON_DOWN,       // I, K
+  74: Controller.BUTTON_LEFT, 76: Controller.BUTTON_RIGHT,    // J, L
+  85: Controller.BUTTON_A,                                     // U
+  72: Controller.BUTTON_B,                                     // H
+  78: Controller.BUTTON_SELECT, 77: Controller.BUTTON_START   // N, M
 };
 
 // =============================================================================
@@ -295,30 +325,69 @@ function onAnimationFrame() {
 // =============================================================================
 // INPUT
 // =============================================================================
-function pollGamepad() {
-  if (gamepadIndex === null) return;
-  const gp = navigator.getGamepads()[gamepadIndex];
+function pollGamepadForPlayer(playerIndex) {
+  const gpIndex = gamepadIndices[playerIndex];
+  if (gpIndex === null) return;
+
+  const gp = navigator.getGamepads()[gpIndex];
   if (!gp) return;
-  
+
+  const nesPlayer = playerIndex + 1; // NES uses 1-based player numbers
+  const gamepadState = gamepadStates[playerIndex];
+  const axisState = axisStates[playerIndex];
+
+  // Poll buttons
   for (const [btn, nesBtn] of Object.entries(GAMEPAD_MAP)) {
     const pressed = gp.buttons[btn]?.pressed ?? false;
     if (pressed !== gamepadState[btn]) {
       gamepadState[btn] = pressed;
-      pressed ? nes.buttonDown(1, nesBtn) : nes.buttonUp(1, nesBtn);
+      pressed ? nes.buttonDown(nesPlayer, nesBtn) : nes.buttonUp(nesPlayer, nesBtn);
+    }
+  }
+
+  // Poll axes for D-pad (8Bitdo N30 and similar controllers)
+  if (gp.axes.length >= 2) {
+    const xAxis = gp.axes[0];
+    const yAxis = gp.axes[1];
+
+    const left = xAxis < -AXIS_THRESHOLD;
+    const right = xAxis > AXIS_THRESHOLD;
+    const up = yAxis < -AXIS_THRESHOLD;
+    const down = yAxis > AXIS_THRESHOLD;
+
+    if (left !== axisState.left) {
+      axisState.left = left;
+      left ? nes.buttonDown(nesPlayer, Controller.BUTTON_LEFT) : nes.buttonUp(nesPlayer, Controller.BUTTON_LEFT);
+    }
+    if (right !== axisState.right) {
+      axisState.right = right;
+      right ? nes.buttonDown(nesPlayer, Controller.BUTTON_RIGHT) : nes.buttonUp(nesPlayer, Controller.BUTTON_RIGHT);
+    }
+    if (up !== axisState.up) {
+      axisState.up = up;
+      up ? nes.buttonDown(nesPlayer, Controller.BUTTON_UP) : nes.buttonUp(nesPlayer, Controller.BUTTON_UP);
+    }
+    if (down !== axisState.down) {
+      axisState.down = down;
+      down ? nes.buttonDown(nesPlayer, Controller.BUTTON_DOWN) : nes.buttonUp(nesPlayer, Controller.BUTTON_DOWN);
     }
   }
 }
 
+function pollGamepad() {
+  pollGamepadForPlayer(0); // Player 1
+  pollGamepadForPlayer(1); // Player 2
+}
+
 function handleKey(callback, e) {
-  const map = {
-    38: Controller.BUTTON_UP, 40: Controller.BUTTON_DOWN,
-    37: Controller.BUTTON_LEFT, 39: Controller.BUTTON_RIGHT,
-    65: Controller.BUTTON_A, 81: Controller.BUTTON_A,
-    83: Controller.BUTTON_B, 79: Controller.BUTTON_B,
-    9: Controller.BUTTON_SELECT, 13: Controller.BUTTON_START
-  };
-  if (map[e.keyCode] !== undefined) {
-    callback(1, map[e.keyCode]);
+  // Check Player 1 keys
+  if (KEYBOARD_MAP_P1[e.keyCode] !== undefined) {
+    callback(1, KEYBOARD_MAP_P1[e.keyCode]);
+    e.preventDefault();
+  }
+  // Check Player 2 keys
+  if (KEYBOARD_MAP_P2[e.keyCode] !== undefined) {
+    callback(2, KEYBOARD_MAP_P2[e.keyCode]);
     e.preventDefault();
   }
 }
@@ -466,18 +535,51 @@ document.addEventListener('keyup', e => {
 });
 
 window.addEventListener('gamepadconnected', e => {
-  gamepadIndex = e.gamepad.index;
-  const s = document.getElementById('gamepadStatus');
-  if (s) { s.textContent = `Gamepad: ${e.gamepad.id.slice(0,15)}...`; s.className = 'connected'; }
+  // Assign to first available player slot
+  if (gamepadIndices[0] === null) {
+    gamepadIndices[0] = e.gamepad.index;
+    updateGamepadStatus();
+  } else if (gamepadIndices[1] === null) {
+    gamepadIndices[1] = e.gamepad.index;
+    updateGamepadStatus();
+  }
 });
 
 window.addEventListener('gamepaddisconnected', e => {
-  if (gamepadIndex === e.gamepad.index) {
-    gamepadIndex = null;
-    const s = document.getElementById('gamepadStatus');
-    if (s) { s.textContent = 'Gamepad: Not connected'; s.className = 'disconnected'; }
+  if (gamepadIndices[0] === e.gamepad.index) {
+    gamepadIndices[0] = null;
+    gamepadStates[0].fill(false);
+    axisStates[0] = { up: false, down: false, left: false, right: false };
+    updateGamepadStatus();
+  } else if (gamepadIndices[1] === e.gamepad.index) {
+    gamepadIndices[1] = null;
+    gamepadStates[1].fill(false);
+    axisStates[1] = { up: false, down: false, left: false, right: false };
+    updateGamepadStatus();
   }
 });
+
+function updateGamepadStatus() {
+  const s = document.getElementById('gamepadStatus');
+  if (!s) return;
+
+  const p1 = gamepadIndices[0] !== null;
+  const p2 = gamepadIndices[1] !== null;
+
+  if (p1 && p2) {
+    s.textContent = 'Gamepads: P1 + P2';
+    s.className = 'connected';
+  } else if (p1) {
+    s.textContent = 'Gamepad: P1';
+    s.className = 'connected';
+  } else if (p2) {
+    s.textContent = 'Gamepad: P2';
+    s.className = 'connected';
+  } else {
+    s.textContent = 'Gamepad: Not connected';
+    s.className = 'disconnected';
+  }
+}
 
 window.addEventListener('dragover', e => e.preventDefault());
 window.addEventListener('drop', e => e.preventDefault());
@@ -490,7 +592,7 @@ document.addEventListener('DOMContentLoaded', () => {
     gc.addEventListener('dragover', e => { e.preventDefault(); gc.classList.add('drag-over'); });
     gc.addEventListener('dragleave', () => gc.classList.remove('drag-over'));
   }
-  
+
   // Zapper / Mouse Support
   const canvas = document.getElementById('nes-canvas');
   if (canvas) {
@@ -508,55 +610,56 @@ document.addEventListener('DOMContentLoaded', () => {
     canvas.addEventListener('mousedown', e => { if (e.button === 0) nes.zapperFireDown(); });
     canvas.addEventListener('mouseup', e => { if (e.button === 0) nes.zapperFireUp(); });
   }
-  
+
   document.getElementById('volume')?.addEventListener('input', e => setVolume(e.target.value / 100));
   initAudioToggles();
-});
 
-document.getElementById('btn-save')?.addEventListener('click', () => {
-  const slot = parseInt(document.getElementById('save-slot').value);
-  saveState(slot);
-});
+  // Save/Load state buttons
+  document.getElementById('btn-save')?.addEventListener('click', () => {
+    const slot = parseInt(document.getElementById('save-slot').value);
+    saveState(slot);
+  });
 
-document.getElementById('btn-load')?.addEventListener('click', () => {
-  const slot = parseInt(document.getElementById('save-slot').value);
-  loadState(slot);
-});
+  document.getElementById('btn-load')?.addEventListener('click', () => {
+    const slot = parseInt(document.getElementById('save-slot').value);
+    loadState(slot);
+  });
 
-document.getElementById('btn-reset')?.addEventListener('click', () => {
-  logStatus('🔄 System Reset', 'info');
-  nes.reset();
-});
+  document.getElementById('btn-reset')?.addEventListener('click', () => {
+    logStatus('🔄 System Reset', 'info');
+    nes.reset();
+  });
 
-// Load ROM button
-document.getElementById('btn-load-rom')?.addEventListener('click', () => {
-  document.getElementById('rom-file')?.click();
-});
+  // Load ROM button
+  document.getElementById('btn-load-rom')?.addEventListener('click', () => {
+    document.getElementById('rom-file')?.click();
+  });
 
-document.getElementById('rom-file')?.addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
+  document.getElementById('rom-file')?.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
 
-  if (!file.name.toLowerCase().endsWith('.nes')) {
-    logStatus('❌ Please select a .nes file', 'error');
-    return;
-  }
-
-  hideOverlay();
-  logStatus(`📦 Loading: ${file.name}`, 'info');
-
-  const reader = new FileReader();
-  reader.onload = async (ev) => {
-    try {
-      await nesLoadData('nes-canvas', new Uint8Array(ev.target.result));
-      logStatus('✓ ROM loaded', 'success');
-      if (nes?.rom) logStatus(`📋 PCB: NES-${nes.rom.getPcbClass()} (Mapper ${nes.rom.mapperType})`, 'info');
-    } catch (err) {
-      logStatus(`❌ ${err.message}`, 'error');
+    if (!file.name.toLowerCase().endsWith('.nes')) {
+      logStatus('❌ Please select a .nes file', 'error');
+      return;
     }
-  };
-  reader.readAsArrayBuffer(file);
 
-  // Reset file input so the same file can be loaded again
-  e.target.value = '';
+    hideOverlay();
+    logStatus(`📦 Loading: ${file.name}`, 'info');
+
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      try {
+        await nesLoadData('nes-canvas', new Uint8Array(ev.target.result));
+        logStatus('✓ ROM loaded', 'success');
+        if (nes?.rom) logStatus(`📋 PCB: NES-${nes.rom.getPcbClass()} (Mapper ${nes.rom.mapperType})`, 'info');
+      } catch (err) {
+        logStatus(`❌ ${err.message}`, 'error');
+      }
+    };
+    reader.readAsArrayBuffer(file);
+
+    // Reset file input so the same file can be loaded again
+    e.target.value = '';
+  });
 });
