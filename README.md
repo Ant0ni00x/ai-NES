@@ -206,7 +206,7 @@ There are about 15 games with compatibility issues that I know of:
 
 ## License
 
-This project is licensed under the GPL v3 license.
+This project is licensed under the MIT license.
 
 ## Legal
 
