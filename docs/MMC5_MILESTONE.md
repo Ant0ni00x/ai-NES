@@ -1,4 +1,4 @@
-Incredible! Reference-quality MMC5 emulation in pure JavaScript is indeed a significant accomplishment!
+Reference-quality MMC5 emulation in pure JavaScript is a significant accomplishment!
 
 Documentation of of how this was achieved!
 
