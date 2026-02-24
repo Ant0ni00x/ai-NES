@@ -74,18 +74,18 @@ Gamepad support is automatic via the Gamepad API.
         ├── mapper003.js        # CNROM
         ├── mapper004.js        # MMC3
         ├── mapper005.js        # MMC5
-        ├── mapper005-audio.js  # MMC5 expansion audio
         ├── mapper006.js        # FFE
         ├── mapper007.js        # AxROM
         ├── mapper009.js        # MMC2
+        ├── mapper010.js        # MMC4
         ├── mapper011.js        # Color Dreams
+        ├── mapper021.js        # VRC2 / VRC4
         ├── mapper025.js        # VRC2 / VRC4
         ├── mapper034.js        # BNROM / NINA-001
         ├── mapper047.js        # NES-QJ
         ├── mapper066.js        # GxROM
         ├── mapper069.js        # Sunsoft FME-7 / 5B
         ├── mapper079.js        # NINA-03 / NINA-06
-        ├── mapper206.js        # DxROM
         ├── ...
         └── mapper-factory.js   # Mapper instantiation factory
 ```
@@ -105,6 +105,7 @@ Gamepad support is automatic via the Gamepad API.
 | MMC2 (9)               | ✅          | Accurate CHR latch timing (Punch‑Out!!!)     |
 | MMC4 (10)              | ✅          | Dual latch variant                           |
 | Color Dreams (11)      | ✅          | 32KB PRG bank switching                      |
+| VRC2 / VRC4 (21)       | ✅          | 8-bit CHR registers (up to 256KB CHR)        |
 | VRC2 / VRC4 (25)       | ✅          | 8-bit CHR registers (up to 256KB CHR)        |
 | NINA-001 (34)          | ✅          | 2x 4KB CHR bank switching                    |
 | NES-QJ (47)            | ✅          | Each block has 128k PRG and 128k CHR         |
@@ -155,15 +156,14 @@ See **[DEBUG_INTEGRATION.md](https://github.com/ZeroGlitchX/ai-NES/blob/main/doc
 
 ## Credits
 
-This emulator is inspired by other JavaScript NES emulators, but coded to behave like console reference emulators. The CPU, PPU and APU are built from the ground up to behave like NES hardware.
+This emulator is inspired by other JavaScript NES emulators, and is coded to behave like console reference emulators. The CPU, PPU and APU are are modular and designed to behave like NES hardware.
 
 Contributed by **ZeroGlitchX** and an assortment of AI friends.
 
 AI Coding Assistance:
-- **[Gemini Pro 3](https://gemini.google.com/)**
 - **[Claude Code](https://claude.com/)**
 - **[ChatGPT/Codex](https://chatgpt.com/)**
-- **[Copilot](https://copilot.microsoft.com/)**
+- **[Gemini Pro 3](https://gemini.google.com/)**
 
 ### Additional Credits
 
@@ -173,34 +173,14 @@ Thanks to the creators of various reference emulators. Extremely valuable for th
 
 - **[Mesen](https://github.com/SourMesen/Mesen2)**
 - **[Higan](https://github.com/higan-emu/higan)**
-- **[WebNES](https://github.com/peteward44/WebNES)**
 - **[JSNES](https://github.com/bfirsh/jsnes)**
+- **[WebNES](https://github.com/peteward44/WebNES)**
 
 And a special thanks to **[AccuracyCoin](https://github.com/100thCoin/AccuracyCoin/tree/main)**, which assisted greatly with game compatibility through accuracy testing and accuracy implementation.
 
 ## Compatibility Notes
 
-If you want to make any improvements, please take a look at the **[TECHNICAL.md](https://github.com/ZeroGlitchX/ai-NES/blob/main/docs/TECHNICAL.md)** and **[ARCHITECTURE.md](https://github.com/ZeroGlitchX/ai-NES/blob/main/docs/ARCHITECTURE.md)** documents and give it a whirl! Currently, there is no native or intentional support for homebrew. The opcodes are not implemented. This release focuses on commercial releases.
-
-There are about 15 games with compatibility issues that I know of:
-
-| No   | Mapper           |               Game               | Notes                                         |
-| :--: | ---------------- | :------------------------------: | --------------------------------------------- |
-| 1    | Mapper 7 (AxROM) |          Super Off-Road          | Freezes on game load                          |
-| 2    | Mapper 4 (MMC3)  |       Adventures of Lolo 2       | Freezes after pressing start title screen     |
-| 3    | Mapper 4 (MMC3)  |      Bram Stoker's Dracula       | Game doesn't start                            |
-| 4    | Mapper 4 (MMC3)  |          Burai Fighter           |                                               |
-| 5    | Mapper 4 (MMC3)  |             G.I. Joe             | Freezes shortly after entering game play area |
-| 6    | Mapper 4 (MMC3)  |  Golgo 13: The Mafat Conspiracy  | Graphical artifacts / Glitchy                 |
-| 7    | Mapper 4 (MMC3)  |            Home Alone            | Game doesn't start                            | 
-| 8    | Mapper 4 (MMC3)  |     Disney's The Jungle Book     |                                               |
-| 9    | Mapper 4 (MMC3)  |           Kick Master            |                                               |
-| 10   | Mapper 4 (MMC3)  |        Krusty's Fun House        |                                               |
-| 11   | Mapper 4 (MMC3)  |       Legacy of the Wizard       |                                               |
-| 12   | Mapper 4 (MMC3)  | Mickey's Adventure in Numberland |                                               |
-| 13   | Mapper 4 (MMC3)  |  Mickey's Safari in Letterland   |                                               |
-| 14   | Mapper 4 (MMC3)  |   Star Trek: 25th Anniversary    | Graphical artifacts / Glitchy                 |
-| 15   | Mapper 1 (MMC1)  |           Air Fortress           | Game doesn't start                            |
+If you want to make any improvements, please take a look at the **[TECHNICAL.md](https://github.com/ZeroGlitchX/ai-NES/blob/main/docs/TECHNICAL.md)** and **[ARCHITECTURE.md](https://github.com/ZeroGlitchX/ai-NES/blob/main/docs/ARCHITECTURE.md)** documents and give it a whirl!
 
 ---
 
