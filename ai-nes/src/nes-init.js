@@ -31,6 +31,13 @@ let batchPos = 0;
 
 let emulationRunning = false;
 let fastForward = false;
+let lastFrameTime = 0;
+let animationLoopStarted = false;
+
+function getFrameIntervalMs() {
+  const interval = nes && Number.isFinite(nes.frameTime) ? nes.frameTime : (1000 / 60);
+  return interval > 0 ? interval : (1000 / 60);
+}
 
 // Gamepad - support for 2 players
 const gamepadIndices = [null, null]; // [player1, player2]
@@ -291,10 +298,18 @@ function initAudioToggles() {
 // =============================================================================
 // MAIN LOOP
 // =============================================================================
-function onAnimationFrame() {
+function onAnimationFrame(timestamp) {
   requestAnimationFrame(onAnimationFrame);
   if (!emulationRunning) return;
-  
+
+  if (!fastForward) {
+    const frameIntervalMs = getFrameIntervalMs();
+    const elapsed = timestamp - lastFrameTime;
+    if (elapsed < frameIntervalMs) return;
+    // Clamp lastFrameTime to avoid spiral-of-death after tab suspension
+    lastFrameTime = timestamp - (elapsed % frameIntervalMs);
+  }
+
   updateAudioQueueEstimate();
 
   // Fast Forward: Run multiple frames per update
@@ -438,7 +453,10 @@ async function nesBoot(romData) {
   syncAudioTime();
 
   emulationRunning = true;
-  requestAnimationFrame(onAnimationFrame);
+  if (!animationLoopStarted) {
+    animationLoopStarted = true;
+    requestAnimationFrame(onAnimationFrame);
+  }
 }
 
 async function nesLoadUrl(canvasId, path) {
@@ -626,8 +644,15 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   document.getElementById('btn-reset')?.addEventListener('click', () => {
-    logStatus('🔄 System Reset', 'info');
-    nes.reset();
+    logStatus('🔄 Hard Reset (Power Cycle)', 'info');
+    // Reset audio state
+    batchPos = 0;
+    resetAudioQueue();
+    audioWorkletNode?.port.postMessage({ type: 'reset' });
+    // True hard reset: re-initializes CPU RAM, PPU VRAM, palette, all registers
+    nes.powerOn();
+    if (nes.mmap) nes.mmap.loadROM();
+    if (audioCtx) syncAudioTime();
   });
 
   // Load ROM button

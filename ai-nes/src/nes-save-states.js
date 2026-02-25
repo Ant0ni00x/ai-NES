@@ -8,7 +8,7 @@
 // =============================================================================
 
 const SAVE_STATE_PREFIX = 'nes_savestate_';
-const SAVE_STATE_VERSION = 2; // v2: Base64 compression for typed arrays
+const SAVE_STATE_VERSION = 3; // v3: strict versioned save state format
 
 // References set by init()
 let nes = null;
@@ -244,9 +244,9 @@ export function loadState(slot = 0) {
 
     const state = JSON.parse(saved);
 
-    // Version compatibility
-    if (state.version < 1 || state.version > SAVE_STATE_VERSION) {
-      logStatus(`❌ Save state version not supported (got v${state.version})`, 'error');
+    // Strict version compatibility
+    if (state.version !== SAVE_STATE_VERSION) {
+      logStatus(`❌ Save state version not supported (got v${state.version}, expected v${SAVE_STATE_VERSION})`, 'error');
       return false;
     }
 
@@ -255,9 +255,7 @@ export function loadState(slot = 0) {
       // Continue anyway - user might be loading intentionally
     }
 
-    // Decompress if v2+, otherwise use raw data
-    const stateData = state.version >= 2 ? decompressState(state.data) : state.data;
-    nes.fromJSON(stateData);
+    nes.fromJSON(decompressState(state.data));
 
     logStatus(`📂 State loaded from slot ${slot}`, 'success');
     return true;
@@ -303,6 +301,11 @@ export function quickLoad() {
     return false;
   }
 
+  if (quickSaveData.version !== SAVE_STATE_VERSION) {
+    logStatus(`❌ Quick save version not supported (got v${quickSaveData.version}, expected v${SAVE_STATE_VERSION})`, 'error');
+    return false;
+  }
+
   if (quickSaveData.romHash && quickSaveData.romHash !== getRomHash()) {
     logStatus('⚠️ Quick save may be from a different ROM', 'warning');
   }
@@ -340,7 +343,7 @@ export function listStates() {
           slot: i,
           timestamp: new Date(state.timestamp).toLocaleString(),
           romHash: state.romHash || 'unknown',
-          version: state.version || 1,
+          version: state.version ?? 'unknown',
           sizeKB: (saved.length / 1024).toFixed(1)
         });
       } catch (e) {
@@ -424,8 +427,8 @@ export function importState(file, slot = 0) {
         if (!state.data || !state.version) {
           throw new Error('Invalid save state format');
         }
-        if (state.version > SAVE_STATE_VERSION) {
-          throw new Error(`Save state version too new (v${state.version}, max supported: v${SAVE_STATE_VERSION})`);
+        if (state.version !== SAVE_STATE_VERSION) {
+          throw new Error(`Save state version not supported (v${state.version}, expected: v${SAVE_STATE_VERSION})`);
         }
 
         const key = SAVE_STATE_PREFIX + slot;
@@ -445,40 +448,6 @@ export function importState(file, slot = 0) {
 
     reader.readAsText(file);
   });
-}
-
-/**
- * Migrate old v1 save states to v2 format (compressed)
- * @returns {number} Number of states migrated
- */
-export function migrateOldSaves() {
-  let migrated = 0;
-
-  for (let i = 0; i < 10; i++) {
-    const key = SAVE_STATE_PREFIX + i;
-    const saved = localStorage.getItem(key);
-
-    if (saved) {
-      try {
-        const state = JSON.parse(saved);
-        if (state.version === 1) {
-          // Compress and re-save
-          state.data = compressState(state.data);
-          state.version = SAVE_STATE_VERSION;
-          localStorage.setItem(key, JSON.stringify(state));
-          migrated++;
-        }
-      } catch (e) {
-        // Skip corrupted saves
-      }
-    }
-  }
-
-  if (migrated > 0) {
-    logStatus(`📦 Migrated ${migrated} save(s) to v2 format`, 'info');
-  }
-
-  return migrated;
 }
 
 /**

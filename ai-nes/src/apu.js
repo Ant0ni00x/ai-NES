@@ -1147,6 +1147,7 @@ export class PAPU {
 
   toJSON() {
     return {
+      stateVersion: 3,
       square1: this.square1.toJSON(),
       square2: this.square2.toJSON(),
       triangle: this.triangle.toJSON(),
@@ -1167,7 +1168,9 @@ export class PAPU {
   }
 
   fromJSON(state) {
-    if (!state) return;
+    if (!state || state.stateVersion !== 3) {
+      throw new Error(`APU save state version not supported (got v${state?.stateVersion}, expected v3)`);
+    }
     if (state.square1) this.square1.fromJSON(state.square1);
     if (state.square2) this.square2.fromJSON(state.square2);
     if (state.triangle) this.triangle.fromJSON(state.triangle);

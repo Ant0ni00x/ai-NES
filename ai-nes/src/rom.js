@@ -49,6 +49,15 @@ export class ROM {
     this.fourScreen = null;
     this.mapperType = null;
     this.valid = false;
+    this.regionHint = "ntsc";
+
+    // NES 2.0 extended fields (-1 = iNES 1.0, use defaults)
+    this.isNES2 = false;
+    this.submapper = 0;
+    this.prgRamSizeBytes = -1;    // Volatile PRG-RAM
+    this.prgNvRamSizeBytes = -1;  // Battery-backed PRG-RAM
+    this.chrRamSizeBytes = -1;    // Volatile CHR-RAM
+    this.chrNvRamSizeBytes = -1;  // Battery-backed CHR-RAM
   }
 
   load(data) {
@@ -83,9 +92,57 @@ export class ROM {
     const isNES2 = (this.header[7] & 0x0c) === 0x08;
     if (isNES2) {
       // iNES 2.0 format
+      this.isNES2 = true;
+
+      // Byte 6-8: Full 12-bit mapper number
       const mapperBase = (this.header[6] >> 4) | (this.header[7] & 0xf0);
-      const mapperMSB = this.header[8] & 0x0f; // Upper 4 bits of mapper number
+      const mapperMSB = this.header[8] & 0x0f;
       this.mapperType = (mapperMSB << 8) | mapperBase;
+
+      // Byte 8 bits 4-7: Submapper number
+      this.submapper = (this.header[8] >> 4) & 0x0F;
+
+      // Byte 9: Extended PRG-ROM / CHR-ROM sizes
+      const prgMsb = this.header[9] & 0x0F;
+      const chrMsb = (this.header[9] >> 4) & 0x0F;
+      if (prgMsb < 15) {
+        this.romCount = (prgMsb << 8) | this.header[4];
+      } else {
+        // Exponent/multiplier mode: size = 2^E * (MM*2 + 1)
+        const E = (this.header[4] >> 2) & 0x3F;
+        const MM = this.header[4] & 0x03;
+        this.romCount = Math.ceil((Math.pow(2, E) * (MM * 2 + 1)) / 16384);
+      }
+      if (chrMsb < 15) {
+        this.vromCount = ((chrMsb << 8) | this.header[5]) * 2;
+      } else {
+        const E = (this.header[5] >> 2) & 0x3F;
+        const MM = this.header[5] & 0x03;
+        this.vromCount = Math.ceil((Math.pow(2, E) * (MM * 2 + 1)) / 4096);
+      }
+
+      // Byte 10: PRG-RAM sizes (shift count; size = 64 << shift, 0 = none)
+      const prgRamShift = this.header[10] & 0x0F;
+      const prgNvRamShift = (this.header[10] >> 4) & 0x0F;
+      this.prgRamSizeBytes = prgRamShift === 0 ? 0 : (64 << prgRamShift);
+      this.prgNvRamSizeBytes = prgNvRamShift === 0 ? 0 : (64 << prgNvRamShift);
+
+      // Byte 11: CHR-RAM sizes (same formula)
+      const chrRamShift = this.header[11] & 0x0F;
+      const chrNvRamShift = (this.header[11] >> 4) & 0x0F;
+      this.chrRamSizeBytes = chrRamShift === 0 ? 0 : (64 << chrRamShift);
+      this.chrNvRamSizeBytes = chrNvRamShift === 0 ? 0 : (64 << chrNvRamShift);
+
+      // Byte 12 bits 0-1: CPU/PPU timing
+      // 0=NTSC, 1=PAL, 2=multi-region, 3=Dendy
+      const timing = this.header[12] & 0x03;
+      if (timing === 1) {
+        this.regionHint = "pal";
+      } else if (timing === 3) {
+        this.regionHint = "dendy";
+      } else {
+        this.regionHint = "ntsc";
+      }
     } else {
       // iNES 1.0 format
       this.mapperType = (this.header[6] >> 4) | (this.header[7] & 0xf0);
@@ -101,12 +158,21 @@ export class ROM {
       if (isDirty) {
         this.mapperType &= 0x0f; // Trust only the lower 4 bits of the mapper number.
       }
+
+      // iNES 1.0 byte 9 bit 0: 0=NTSC, 1=PAL (often unreliable; best-effort only)
+      this.regionHint = (this.header[9] & 0x01) ? "pal" : "ntsc";
     }
 
-    // Calculate offset (skip trainer if present)
+    // Load trainer data if present (512 bytes, loaded to PRG-RAM $7000 by mapper)
     let offset = 16;
     if (this.trainer) {
+      this.trainerData = new Uint8Array(512);
+      for (let i = 0; i < 512; i++) {
+        this.trainerData[i] = isUint8Array ? data[offset + i] : (data.charCodeAt(offset + i) & 0xff);
+      }
       offset += 512;
+    } else {
+      this.trainerData = null;
     }
 
     // ========================================
@@ -161,6 +227,10 @@ export class ROM {
     // 0 = Horizontal Mirroring
     // 1 = Vertical Mirroring
     return this.mirroring === 0 ? this.HORIZONTAL_MIRRORING : this.VERTICAL_MIRRORING;
+  }
+
+  getRegionHint() {
+    return this.regionHint || "ntsc";
   }
 
   getMapperName() {

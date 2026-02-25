@@ -1,71 +1,78 @@
-// Mapper 079: NINA-03 / NINA-06
-// Used by: Caltron 6-in-1, Magic Dragon, Metal Fighter
-//
-// Features:
-//   - 32KB PRG bank switching
-//   - 8KB CHR bank switching
-//
-// References:
-//   - https://wiki.nesdev.com/w/index.php/NINA-03
-//   - https://wiki.nesdev.com/w/index.php/NINA-06
+import BaseMapper from "./mapper-base.js";
 
-import Mapper from './mapper-base.js';
+// Mapper 079 (NINA-03 / NINA-06)
+// Mesen reference behavior from mesen-nina03_06.h.
+export default class Mapper079 extends BaseMapper {
+  getPrgPageSize() {
+    return 0x8000;
+  }
 
-export default class Mapper079 extends Mapper {
-    constructor(cartridge) {
-        super(cartridge);
-        this.prgBank = 0;
-        this.chrBank = 0;
-        this.reset();
+  getChrPageSize() {
+    return 0x2000;
+  }
+
+  registerStartAddress() {
+    return 0x4100;
+  }
+
+  registerEndAddress() {
+    return 0x5fff;
+  }
+
+  _isMulticartMode() {
+    // Mesen uses the same core for mapper 79 (false) and 113 (true).
+    // This mapper file is registered as 79, so this resolves to false in normal use.
+    return !!(this.cartridge && (this.cartridge.mapperType | 0) === 113);
+  }
+
+  _applyRegister(value) {
+    const reg = value & 0xff;
+    this._reg = reg;
+
+    if (this._isMulticartMode()) {
+      // Mapper 113 mode (not used by mapper 79 registration, but kept
+      // for parity with the Mesen Nina03_06 core behavior).
+      this.SelectPrgPage(0, (reg >> 3) & 0x07);
+      this.SelectChrPage(0, (reg & 0x07) | ((reg >> 3) & 0x08));
+      this.SetMirroringType((reg & 0x80) === 0x80 ? this.MIRROR_VERTICAL : this.MIRROR_HORIZONTAL);
+      return;
     }
 
-    reset() {
-        this.prgBank = 0;
-        this.chrBank = 0;
-        this.updateBanks();
+    this.SelectPrgPage(0, (reg >> 3) & 0x01);
+    this.SelectChrPage(0, reg & 0x07);
+  }
 
-        if (this.nes && this.nes.rom) {
-            this.nes.ppu.setMirroring(this.nes.rom.getMirroringType());
-        }
-    }
+  initMapper() {
+    this.SelectPrgPage(0, 0);
+    this.SelectChrPage(0, 0);
+    this._reg = 0;
+  }
 
-    cpuRead(address) {
-        if (address >= 0x8000) {
-            const slot = (address >> 13) & 0x03;
-            const offset = address & 0x1FFF;
-            return this.prgData[this.prgPagesMap[slot] + offset];
-        }
-        return undefined;
-    }
+  reset(softReset = false) {
+    super.reset(softReset);
+    this.initMapper();
+  }
 
-    cpuWrite(address, data) {
-        // Register is mapped at $4100-$5FFF
-        // Note: The register is often documented as being at $7FFD, but it's mirrored.
-        if (address >= 0x4100 && address <= 0x5FFF) {
-            // Standard NINA-03/06 behavior:
-            // 7  bit  0
-            // ---- ----
-            // ...C PPPP
-            //    | ++++- Select 8 KB CHR ROM bank
-            //    +------ Select 32 KB PRG ROM bank
-            this.chrBank = data & 0x0F;
-            this.prgBank = (data >> 4) & 0x01;
-            this.updateBanks();
-        }
+  writeRegister(addr, value) {
+    const address = addr & 0xffff;
+    if ((address & 0xe100) !== 0x4100) {
+      return;
     }
+    this._applyRegister(value);
+  }
 
-    updateBanks() {
-        this.switch32kPrgBank(this.prgBank);
-        this.switch8kChrBank(this.chrBank);
-    }
+  toJSON() {
+    return {
+      ...super.toJSON(),
+      mapper079: {
+        reg: this._reg | 0,
+      },
+    };
+  }
 
-    toJSON() {
-        return { prgBank: this.prgBank, chrBank: this.chrBank };
-    }
-
-    fromJSON(state) {
-        this.prgBank = state.prgBank;
-        this.chrBank = state.chrBank;
-        this.updateBanks();
-    }
+  fromJSON(state) {
+    super.fromJSON(state);
+    const reg = (state && state.mapper079 && state.mapper079.reg) ?? 0;
+    this._applyRegister(reg);
+  }
 }

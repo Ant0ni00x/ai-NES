@@ -1,67 +1,64 @@
-// Mapper 007: AxROM
-// Used by: Battletoads, Cobra Triangle, Wizards and Warriors Games
-//
-// Features:
-//   - 32KB PRG bank switching
-//   - 1KB VRAM page switching for nametables (Single Screen Mirroring)
-//
-// References:
-//   - https://wiki.nesdev.com/w/index.php/AxROM
- 
-import Mapper from './mapper-base.js';
+import BaseMapper from "./mapper-base.js";
 
-export default class Mapper007 extends Mapper {
-    constructor(cartridge) {
-        super(cartridge);
-        this.prgBank = 0;
-        this.mirroring = 0;
-        
-        // AxROM uses CHR-RAM (8KB)
-        this.useVRAM(8);
-        
-        this.reset();
-    }
+// Mapper 007 (AxROM / AOROM)
+// Mesen reference behavior from mesen-axrom.h:
+// - PRG: switchable 32KB bank at $8000-$FFFF (low 4 bits)
+// - CHR: fixed 8KB page 0
+// - Mirroring: single-screen A/B by bit 4
+// - Bus conflicts: enabled for NES 2.0 submapper 2
+export default class Mapper007 extends BaseMapper {
+  getPrgPageSize() {
+    return 0x8000;
+  }
 
-    reset() {
-        this.prgBank = 0;
-        this.mirroring = 0;
-        this.updateState();
-    }
+  getChrPageSize() {
+    return 0x2000;
+  }
 
-    cpuRead(address) {
-        if (address >= 0x8000) {
-            const slot = (address >> 13) & 0x03;
-            const offset = address & 0x1FFF;
-            return this.prgData[this.prgPagesMap[slot] + offset];
-        }
-        return undefined;
-    }
+  hasBusConflicts() {
+    return !!(this.cartridge && ((this.cartridge.submapper | 0) === 2));
+  }
 
-    cpuWrite(address, data) {
-        if (address >= 0x8000) {
-            // AxROM: 32KB Bank Select + Mirroring
-            // 7  bit  0
-            // ---- ----
-            // ...M PPPP
-            //    | ||||
-            //    | ++++- Select 32KB PRG ROM bank
-            //    +------ Select 1KB VRAM page for all 4 nametables (Single Screen Mirroring)
-            
-            this.prgBank = data & 0x0F;
-            this.mirroring = (data >> 4) & 0x01;
-            this.updateState();
-        }
-    }
+  _getPowerOnByte(defaultValue = 0) {
+    // This codebase does not currently expose RandomizeMapperPowerOnState.
+    return defaultValue & 0xFF;
+  }
 
-    updateState() {
-        // PRG Banking (32KB)
-        this.switch32kPrgBank(this.prgBank);
+  _applyRegister(value) {
+    const reg = value & 0xFF;
+    this._axromReg = reg;
 
-        // Mirroring
-        // 0 = Single Screen A (Lower) -> PPU Mode 2
-        // 1 = Single Screen B (Upper) -> PPU Mode 3
-        if (this.nes && this.nes.ppu) {
-            this.nes.ppu.setMirroring(this.mirroring === 0 ? 2 : 3);
-        }
-    }
+    this.SelectPrgPage(0, reg & 0x0F);
+    this.SetMirroringType((reg & 0x10) ? this.MIRROR_SINGLE_B : this.MIRROR_SINGLE_A);
+  }
+
+  initMapper() {
+    this.SelectChrPage(0, 0);
+    this.writeRegister(0, this._getPowerOnByte());
+  }
+
+  reset(softReset = false) {
+    super.reset(softReset);
+    this.SelectChrPage(0, 0);
+    this.writeRegister(0, this._getPowerOnByte());
+  }
+
+  writeRegister(_addr, value) {
+    this._applyRegister(value);
+  }
+
+  toJSON() {
+    return {
+      ...super.toJSON(),
+      mapper007: {
+        reg: this._axromReg ?? 0,
+      },
+    };
+  }
+
+  fromJSON(state) {
+    super.fromJSON(state);
+    this.SelectChrPage(0, 0);
+    this._applyRegister((state && state.mapper007 && state.mapper007.reg) ?? 0);
+  }
 }

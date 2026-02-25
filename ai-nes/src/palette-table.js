@@ -8,15 +8,16 @@ export class PaletteTable {
   reset() { this.setEmphasis(0); }
 
   loadNTSCPalette() {
+    // Nestopia-style NTSC palette — widely used and well-tested
     this.curTable = [
-        0x545454, 0x001E74, 0x081090, 0x300088, 0x440064, 0x5C0030, 0x540400, 0x3C1800,
-        0x202A00, 0x083A00, 0x004000, 0x003C00, 0x00323C, 0x000000, 0x000000, 0x000000,
-        0x989698, 0x084CC4, 0x3032EC, 0x5C1EE4, 0x8814B0, 0xA01464, 0x982220, 0x783C00,
-        0x545A00, 0x287200, 0x087C00, 0x007628, 0x006678, 0x000000, 0x000000, 0x000000,
-        0xECEEEC, 0x4C9AEC, 0x787CEC, 0xB062EC, 0xE458EC, 0xEC58B4, 0xEC6A64, 0xD48820,
-        0xA0AA00, 0x74C400, 0x4CD020, 0x38CC6C, 0x38B4CC, 0x3C3C3C, 0x000000, 0x000000,
-        0xECEEEC, 0xA8CCEC, 0xBCBCEC, 0xD4B2EC, 0xECAEEC, 0xECAED4, 0xECB4B0, 0xE4C490,
-        0xCCD278, 0xB6DE78, 0xA8E294, 0x98E2B4, 0xA0D6E4, 0xA0A2A0, 0x000000, 0x000000
+        0x666666, 0x002A88, 0x1412A7, 0x3B00A4, 0x5C007E, 0x6E0040, 0x6C0600, 0x561D00,
+        0x333500, 0x0B4800, 0x005200, 0x004F08, 0x00404D, 0x000000, 0x000000, 0x000000,
+        0xADADAD, 0x155FD9, 0x4240FF, 0x7527FE, 0xA01ACC, 0xB71E7B, 0xB53120, 0x994E00,
+        0x6B6D00, 0x388700, 0x0C9300, 0x008F32, 0x007C8D, 0x000000, 0x000000, 0x000000,
+        0xFFFEFF, 0x64B0FF, 0x9290FF, 0xC676FF, 0xF36AFF, 0xFE6ECC, 0xFE8170, 0xEA9E22,
+        0xBCBE00, 0x88D800, 0x5CE430, 0x45E082, 0x48CDDE, 0x4F4F4F, 0x000000, 0x000000,
+        0xFFFEFF, 0xC0DFFF, 0xD3D2FF, 0xE8C8FF, 0xFBC2FF, 0xFEC4EA, 0xFECCC5, 0xF7D8A5,
+        0xE4E594, 0xCFEF96, 0xBDF4AB, 0xB3F3CC, 0xB5EBF2, 0xB8B8B8, 0x000000, 0x000000
     ];
     this.makeTables();
     this.setEmphasis(0);
@@ -39,7 +40,6 @@ export class PaletteTable {
 
   makeTables() {
     let r, g, b, col, rFactor, gFactor, bFactor;
-    const BRIGHTNESS_BOOST = 1.3; // Increase brightness by 20% (adjust as needed)
 
     for (let emph = 0; emph < 8; emph++) {
       rFactor = 1.0; gFactor = 1.0; bFactor = 1.0;
@@ -52,10 +52,9 @@ export class PaletteTable {
       this.emphTable[emph] = new Array(64);
       for (let i = 0; i < 64; i++) {
         col = this.curTable[i];
-        // Apply brightness boost while respecting emphasis
-        r = Math.min(255, Math.floor(this.getRed(col) * rFactor * BRIGHTNESS_BOOST));
-        g = Math.min(255, Math.floor(this.getGreen(col) * gFactor * BRIGHTNESS_BOOST));
-        b = Math.min(255, Math.floor(this.getBlue(col) * bFactor * BRIGHTNESS_BOOST));
+        r = Math.min(255, Math.floor(this.getRed(col) * rFactor));
+        g = Math.min(255, Math.floor(this.getGreen(col) * gFactor));
+        b = Math.min(255, Math.floor(this.getBlue(col) * bFactor));
         this.emphTable[emph][i] = this.getRgb(r, g, b);
       }
     }

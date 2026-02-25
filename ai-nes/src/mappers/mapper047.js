@@ -1,58 +1,76 @@
-// Mapper 047: Extension of (MMC3)
-// Used by: Super Spike V'Ball + Nintendo World Cup
-//
-// Features:
-//   - PRG and CHR ROM into two 128KB blocks. 
-//   - Register at $6000 select the active block.
-//
-// References:
-//   - https://www.nesdev.org/wiki/INES_Mapper_047
+import Mapper004 from "./mapper004.js";
 
-import Mapper004 from './mapper004.js';
-
+// Mapper 047 (MMC3_47 / NES-QJ)
+// Mesen reference behavior from mesen-mmc3-47.h:
+// - Extends MMC3
+// - Register range is $6000-$FFFF
+// - $6000-$7FFF selects 128k PRG/CHR block when WRAM writes are allowed
+// - PRG/CHR page selection is masked and OR'ed with selected block
 export default class Mapper047 extends Mapper004 {
-  constructor(cartridge) {
-    super(cartridge);
-    this.block = 0;
+  registerStartAddress() {
+    return 0x6000;
   }
 
-  reset() {
-    super.reset();
-    this.block = 0;
-    this.updateBanks();
+  registerEndAddress() {
+    return 0xFFFF;
   }
 
-  /**
-   * Writes to $6000-$7FFF select the 128KB block.
-   * Bit 0: Block Select (0 = First 128KB, 1 = Second 128KB)
-   */
-  cpuWrite(address, value) {
-    if (address >= 0x6000 && address <= 0x7FFF) {
-      this.block = value & 0x01;
-      this.updateBanks();
+  selectChrPage(slot, page, memoryType = this.ChrMemoryType.Default) {
+    let mappedPage = page & 0x7F;
+    if ((this._selectedBlock | 0) === 1) {
+      mappedPage |= 0x80;
+    }
+    return super.selectChrPage(slot, mappedPage, memoryType);
+  }
+
+  selectPrgPage(slot, page, memoryType = this.PrgMemoryType.PrgRom) {
+    let mappedPage = page & 0x0F;
+    if ((this._selectedBlock | 0) === 1) {
+      mappedPage |= 0x10;
+    }
+    return super.selectPrgPage(slot, mappedPage, memoryType);
+  }
+
+  initMapper() {
+    super.initMapper();
+    this._selectedBlock = 0;
+    this._updateState();
+  }
+
+  reset(softReset = false) {
+    super.reset(softReset);
+    this._selectedBlock = 0;
+    this._updateState();
+  }
+
+  writeRegister(addr, value) {
+    const address = addr & 0xFFFF;
+    const writeValue = value & 0xFF;
+
+    if (address < 0x8000) {
+      if (this._canWriteToWorkRam()) {
+        this._selectedBlock = writeValue & 0x01;
+        this._updateState();
+      }
       return;
     }
-    super.cpuWrite(address, value);
+
+    super.writeRegister(address, writeValue);
   }
 
-  updateBanks() {
-    super.updateBanks();
+  toJSON() {
+    return {
+      ...super.toJSON(),
+      mapper047: {
+        selectedBlock: this._selectedBlock | 0,
+      },
+    };
+  }
 
-    // Apply Mapper 47 masking (128KB blocks)
-    // PRG: 128KB = 16 x 8KB banks -> Mask 0x0F
-    const prgBlockOffset = this.block << 4;
-    for (let i = 0; i < this.prgOffsets.length; i++) {
-      let bank = this.prgOffsets[i] >>> 13;
-      bank = (bank & 0x0F) | prgBlockOffset;
-      this.prgOffsets[i] = bank << 13;
-    }
-
-    // CHR: 128KB = 128 x 1KB banks -> Mask 0x7F
-    const chrBlockOffset = this.block << 7;
-    for (let i = 0; i < this.chrOffsets.length; i++) {
-      let bank = this.chrOffsets[i] >>> 10;
-      bank = (bank & 0x7F) | chrBlockOffset;
-      this.chrOffsets[i] = bank << 10;
-    }
+  fromJSON(state) {
+    super.fromJSON(state);
+    this._selectedBlock = (state && state.mapper047 && state.mapper047.selectedBlock) ?? 0;
+    this._selectedBlock &= 0x01;
+    this._updateState();
   }
 }

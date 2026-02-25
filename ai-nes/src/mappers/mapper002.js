@@ -1,80 +1,57 @@
-// Mapper 002: (UNROM)
-// Used by: Blades of Steel, Castlevania, Contra, Jackal
-//
-// Features:
-//   - 16KB PRG bank switching at $8000-$BFFF
-//   - Fixed 16KB PRG bank at $C000-$FFFF (last bank)
-//   - Uses CHR-RAM (8KB) instead of CHR-ROM
-//
-// References:
-//   - https://wiki.nesdev.com/w/index.php/UNROM
+import BaseMapper from "./mapper-base.js";
 
-import Mapper from './mapper-base.js';
+// Mapper 002 (UNROM/UOROM family baseline)
+// Mesen reference (UNROM):
+// - PRG: 16KB banks at $8000 (switchable), $C000 fixed to last bank
+// - CHR: 8KB fixed (CHR-ROM page 0 or CHR-RAM page 0)
+// - Bus conflicts only for NES 2.0 submapper 2
+export default class Mapper002 extends BaseMapper {
+  getPrgPageSize() {
+    return 0x4000;
+  }
 
-export default class Mapper002 extends Mapper {
-    constructor(cartridge) {
-        super(cartridge);
-        this.prgBank = 0;
-        
-        // UNROM uses CHR-RAM (8KB), but some dumps might have CHR-ROM
-        if (this.chrData && this.chrData.length > 0) {
-            this.usingChrRam = false;
-        } else {
-            this.useVRAM(8);
-        }
-        this.reset();
-    }
+  getChrPageSize() {
+    return 0x2000;
+  }
 
-    reset() {
-        this.prgBank = 0;
-        this.updateBanks();
+  hasBusConflicts() {
+    return !!(this.cartridge && ((this.cartridge.submapper | 0) === 2));
+  }
 
-        // Set mirroring from ROM header
-        if (this.nes && this.nes.rom) {
-            this.nes.ppu.setMirroring(this.nes.rom.getMirroringType());
-        }
-    }
+  _applyBankState() {
+    this.SelectPrgPage(0, this._prgBank | 0);
+    this.SelectPrgPage(1, -1);
+    this.SelectChrPage(0, 0);
+  }
 
-    updateBanks() {
-        // Bank 0 (Switchable) at $8000-$BFFF
-        this.switch16kPrgBank(this.prgBank, true);
+  initMapper() {
+    this._prgBank = 0;
+    this._applyBankState();
+  }
 
-        // Last Bank (Fixed) at $C000-$FFFF
-        const lastBank = this.get16kPrgBankCount() - 1;
-        this.switch16kPrgBank(lastBank, false);
-    }
+  reset(softReset = false) {
+    super.reset(softReset);
+    this._prgBank = 0;
+    this._applyBankState();
+  }
 
-    cpuRead(address) {
-        if (address >= 0x8000) {
-            const slot = (address >> 13) & 0x03;
-            const offset = address & 0x1FFF;
-            return this.prgData[this.prgPagesMap[slot] + offset];
-        }
-        return undefined;
-    }
+  writeRegister(_addr, value) {
+    this._prgBank = value & 0xFF;
+    this._applyBankState();
+  }
 
-    cpuWrite(address, data) {
-        // UNROM: Writes to $8000-$FFFF select the bank for $8000-$BFFF
-        if (address >= 0x8000) {
-            this.prgBank = data;
-            this.updateBanks();
-        }
-    }
+  toJSON() {
+    return {
+      ...super.toJSON(),
+      mapper002: {
+        prgBank: this._prgBank | 0,
+      },
+    };
+  }
 
-    toJSON() {
-        return {
-            prgBank: this.prgBank,
-            chrRam: this.usingChrRam ? Array.from(this.chrRam) : null
-        };
-    }
-
-    fromJSON(state) {
-        this.prgBank = state.prgBank;
-        if (state.chrRam) {
-            this.chrRam = new Uint8Array(state.chrRam);
-            this.chrData = this.chrRam;
-            this.usingChrRam = true;
-        }
-        this.updateBanks();
-    }
+  fromJSON(state) {
+    super.fromJSON(state);
+    this._prgBank = (state && state.mapper002 && state.mapper002.prgBank) ?? this._prgBank ?? 0;
+    this._applyBankState();
+  }
 }

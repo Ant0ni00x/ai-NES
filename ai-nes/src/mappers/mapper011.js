@@ -1,71 +1,64 @@
-// Mapper 011: Color Dreams
-// Used by: Color Dreams Games
-//
-// Features:
-//   - 32KB PRG bank switching
-//   - 8KB CHR bank switching
-//
-// References:
-//   - https://wiki.nesdev.com/w/index.php/Color_Dreams
+import BaseMapper from "./mapper-base.js";
 
-import Mapper from './mapper-base.js';
+// Mapper 011 (Color Dreams)
+// Mesen reference behavior from mesen-colordreams.h:
+// - PRG: 32KB switchable bank (low nibble)
+// - CHR: 8KB switchable bank (high nibble)
+// - Bus conflicts: enabled
+// - Mapper 144 variant: ROM LSB always wins conflict
+export default class Mapper011 extends BaseMapper {
+  getPrgPageSize() {
+    return 0x8000;
+  }
 
-export default class Mapper011 extends Mapper {
-    constructor(cartridge) {
-        super(cartridge);
-        this.prgBank = 0;
-        this.chrBank = 0;
-        this.reset();
+  getChrPageSize() {
+    return 0x2000;
+  }
+
+  hasBusConflicts() {
+    return true;
+  }
+
+  _applyRegister(value) {
+    const reg = value & 0xFF;
+    this._reg = reg;
+
+    this.SelectPrgPage(0, reg & 0x0F);
+    this.SelectChrPage(0, (reg >> 4) & 0x0F);
+  }
+
+  initMapper() {
+    this._applyRegister(0);
+  }
+
+  reset(softReset = false) {
+    super.reset(softReset);
+    this._applyRegister(0);
+  }
+
+  writeRegister(addr, value) {
+    let writeValue = value & 0xFF;
+
+    // Mesen mapper 144 quirk:
+    // only ROM bit 0 always wins bus conflicts.
+    if (this.cartridge && (this.cartridge.mapperType | 0) === 144) {
+      writeValue |= this.readRam(addr & 0xFFFF) & 0x01;
     }
 
-    reset() {
-        this.prgBank = 0;
-        this.chrBank = 0;
-        this.updateBanks();
+    this._applyRegister(writeValue);
+  }
 
-        // Set mirroring from ROM header
-        if (this.nes && this.nes.rom) {
-            this.nes.ppu.setMirroring(this.nes.rom.getMirroringType());
-        }
-    }
+  toJSON() {
+    return {
+      ...super.toJSON(),
+      mapper011: {
+        reg: this._reg ?? 0,
+      },
+    };
+  }
 
-    cpuRead(address) {
-        if (address >= 0x8000) {
-            const slot = (address >> 13) & 0x03;
-            const offset = address & 0x1FFF;
-            return this.prgData[this.prgPagesMap[slot] + offset];
-        }
-        return undefined;
-    }
-
-    cpuWrite(address, data) {
-        if (address >= 0x8000) {
-            // Color Dreams:
-            // 7  bit  0
-            // ---- ----
-            // CCCC PPPP
-            // |||| ||||
-            // |||| ++++- Select 32 KB PRG ROM bank
-            // ++++------ Select 8 KB CHR ROM bank
-
-            this.prgBank = data & 0x0F;
-            this.chrBank = (data >> 4) & 0x0F;
-            this.updateBanks();
-        }
-    }
-
-    updateBanks() {
-        this.switch32kPrgBank(this.prgBank);
-        this.switch8kChrBank(this.chrBank);
-    }
-
-    toJSON() {
-        return { prgBank: this.prgBank, chrBank: this.chrBank };
-    }
-
-    fromJSON(state) {
-        this.prgBank = state.prgBank;
-        this.chrBank = state.chrBank;
-        this.updateBanks();
-    }
+  fromJSON(state) {
+    super.fromJSON(state);
+    this._applyRegister((state && state.mapper011 && state.mapper011.reg) ?? 0);
+  }
 }

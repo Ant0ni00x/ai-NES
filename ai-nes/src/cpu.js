@@ -1,673 +1,1517 @@
-import { toJSON, fromJSON } from "./utils.js";
+// ============================================================================
+// NES CPU (2A03 / 6502-derived)
+// Mesen-aligned baseline with mapper-agnostic CPU core + required hook points
+// ============================================================================
 
-// Pre-compute opcode data once at module load
-const OPDATA = buildOpData();
+const FLAG_CARRY = 0x01;
+const FLAG_ZERO = 0x02;
+const FLAG_INTERRUPT = 0x04;
+const FLAG_DECIMAL = 0x08;
+const FLAG_BREAK = 0x10;
+const FLAG_RESERVED = 0x20;
+const FLAG_OVERFLOW = 0x40;
+const FLAG_NEGATIVE = 0x80;
+
+const RESET_VECTOR = 0xFFFC;
+const NMI_VECTOR = 0xFFFA;
+const IRQ_VECTOR = 0xFFFE;
+
+const AM = {
+  None: 0,
+  Acc: 1,
+  Imp: 2,
+  Imm: 3,
+  Rel: 4,
+  Zero: 5,
+  ZeroX: 6,
+  ZeroY: 7,
+  Ind: 8,
+  IndX: 9,
+  IndY: 10,
+  IndYW: 11,
+  Abs: 12,
+  AbsX: 13,
+  AbsXW: 14,
+  AbsY: 15,
+  AbsYW: 16,
+  Other: 17,
+};
 
 export class CPU {
-  static IRQ_NORMAL = 0;
-  static IRQ_NMI = 1;
-  static IRQ_RESET = 2;
-
-  get IRQ_NORMAL() { return CPU.IRQ_NORMAL; }
-  get IRQ_NMI() { return CPU.IRQ_NMI; }
-  get IRQ_RESET() { return CPU.IRQ_RESET; }
-
-  static JSON_PROPERTIES = [
-    "mem", "cyclesToHalt", "irqRequested", "irqType", "REG_ACC", "REG_X",
-    "REG_Y", "REG_SP", "REG_PC", "REG_PC_NEW", "REG_STATUS", "F_CARRY",
-    "F_DECIMAL", "F_INTERRUPT", "F_INTERRUPT_NEW", "F_OVERFLOW", "F_SIGN",
-    "F_ZERO", "F_NOTUSED", "F_NOTUSED_NEW", "F_BRK", "F_BRK_NEW", "cycleCount",
-    "dataBus"
-  ];
-
   constructor(nes) {
     this.nes = nes;
-    this.cycleCount = 0;  // Total CPU cycles executed (for mapper timing)
+
+    // Public RAM view used by diagnostics.
+    this.ram = new Uint8Array(0x800);
+
+    // Debug compatibility mirror (legacy tools probe cpu.mem directly).
     this.mem = new Uint8Array(0x10000);
-    this.powerOn();
+
+    // Registers
+    this.A = 0;
+    this.X = 0;
+    this.Y = 0;
+    this.SP = 0xFD;
+    this.P = FLAG_INTERRUPT;
+    this.PC = 0;
+
+    // Bus/open-bus latch
+    this.dataBus = 0;
+
+    // Interrupt lines/state
+    this.nmiFlag = false;
+    this.irqFlag = 0;
+    this.irqMask = 0xFF;
+
+    this.prevRunIrq = false;
+    this.runIrq = false;
+    this.prevNmiFlag = false;
+    this.prevNeedNmi = false;
+    this.needNmi = false;
+
+    // Cycle accounting
+    this.cycleCount = 0;
+    this.cycleOffset = 0;
+    this.cyclesThisStep = 0;
+
+    // Mesen-style clock divider metadata (kept for compatibility/debug)
+    this.startClockCount = 6;
+    this.endClockCount = 6;
+    this.ppuOffset = 0;
+
+    // Instruction decode state
+    this.instAddrMode = AM.None;
+    this.operand = 0;
+
+    // DMA / halt state
+    this.cyclesToHalt = 0;
+
+    // Bus access mode marker (debug-friendly)
+    this.cpuWrite = false;
+
+    // IRQ constants exposed for APU/PPU integration.
+    this.IRQ_NMI = 1;
+    this.IRQ_NORMAL = 2;
+    this.IRQ_DMC = 4;
+    this.IRQ_EXTERNAL = 8;
+
+    this.opTable = this._buildOpTable();
+    this.addrModeTable = this._buildAddrModeTable();
+
+    // Initialize deterministic RAM pattern once; reset/powerOn control CPU state.
+    this._initRam();
+  }
+
+  // ===========================================================================
+  // RESET / POWER
+  // ===========================================================================
+
+  _resolveRegion() {
+    if (this.nes && this.nes.ppu && this.nes.ppu.region) {
+      return String(this.nes.ppu.region).toLowerCase();
+    }
+    return "ntsc";
+  }
+
+  _setMasterClockDivider(region) {
+    const normalized = String(region || "ntsc").toLowerCase();
+
+    if (normalized === "pal") {
+      this.startClockCount = 8;
+      this.endClockCount = 8;
+    } else if (normalized === "dendy") {
+      this.startClockCount = 7;
+      this.endClockCount = 8;
+    } else {
+      this.startClockCount = 6;
+      this.endClockCount = 6;
+    }
+  }
+
+  _initRam() {
+    const pattern = this.nes && this.nes.opts ? this.nes.opts.ramInitPattern : "hardware";
+
+    if (pattern === "all_ff") {
+      this.ram.fill(0xFF);
+      return;
+    }
+
+    if (pattern === "all_zero") {
+      this.ram.fill(0x00);
+      return;
+    }
+
+    if (pattern === "random") {
+      for (let i = 0; i < this.ram.length; i++) {
+        this.ram[i] = (Math.random() * 256) | 0;
+      }
+      return;
+    }
+
+    // Hardware-like repeating pattern.
+    for (let i = 0; i < this.ram.length; i++) {
+      this.ram[i] = ((i & 1) ^ ((i >> 3) & 1)) ? 0xFF : 0x00;
+    }
+  }
+
+  _resetInternalState() {
+    this.nmiFlag = false;
+    this.irqFlag = 0;
+
+    this.prevRunIrq = false;
+    this.runIrq = false;
+    this.prevNmiFlag = false;
+    this.prevNeedNmi = false;
+    this.needNmi = false;
+
+    this.cyclesToHalt = 0;
+    this.cpuWrite = false;
+
+    this.instAddrMode = AM.None;
+    this.operand = 0;
+  }
+
+  _setResetVector() {
+    const lo = this._rawRead(RESET_VECTOR);
+    const hi = this._rawRead((RESET_VECTOR + 1) & 0xFFFF);
+    this.PC = (lo | (hi << 8)) & 0xFFFF;
+  }
+
+  _startupDelayCycles() {
+    // Mesen: 8 startup cycles before normal instruction fetch.
+    for (let i = 0; i < 8; i++) {
+      this._startCycle(true);
+      this._endCycle(true);
+    }
   }
 
   powerOn() {
-    // On power-on, RAM is undefined. For emulation, we can use a pattern.
-    const ramPattern = this.nes.opts.ramInitPattern || 'all_zero';
+    this._initRam();
+    this._resetInternalState();
 
-    switch (ramPattern) {
-      case 'all_zero':
-        this.mem.fill(0x00, 0, 0x2000);
-        break;
-      case 'all_ff':
-        this.mem.fill(0xFF, 0, 0x2000);
-        break;
-      case 'random':
-        for (let i = 0; i < 0x2000; i++) {
-          this.mem[i] = (Math.random() * 256) | 0;
-        }
-        break;
-    }
-    this.reset();
-  }
+    this.A = 0;
+    this.X = 0;
+    this.Y = 0;
+    this.SP = 0xFD;
+    this.P = FLAG_INTERRUPT;
 
-  reset() {
-    this.cycleCount = 0;
+    this.irqMask = 0xFF;
 
-    // CPU data bus for open bus behavior
-    this.dataBus = 0;
+    this._setMasterClockDivider(this._resolveRegion());
 
-    // Track if controllers were read this instruction (for double-read fix)
-    this.controller1Read = false;
-    this.controller2Read = false;
-
-    this.REG_ACC = 0;
-    this.REG_X = 0;
-    this.REG_Y = 0;
-    this.REG_SP = 0xFD;
-    this.REG_PC = 0x8000 - 1;
-    this.REG_PC_NEW = 0x8000 - 1;
-    this.REG_STATUS = 0x24;
-
-    this.setStatus(0x24);
-    this.F_BRK_NEW = this.F_BRK;
-    this.F_INTERRUPT_NEW = this.F_INTERRUPT;
-
-    this.cyclesToHalt = 0;
+    // Mesen starts cycle counter at -1 before startup cycles.
+    this.cycleCount = -1;
     this.cycleOffset = 0;
+    this.cyclesThisStep = 0;
 
-    this.irqRequested = true;
-    this.irqType = CPU.IRQ_RESET;
-    
-    this.instructionCount = 0;
+    this._setResetVector();
+    this._startupDelayCycles();
   }
 
-  // =================================================================
-  // MEMORY MAPPING
-  // =================================================================
-  cpuRead(addr) {
-    let value;
+  // Soft reset (NES reset button behavior)
+  reset() {
+    this._resetInternalState();
 
-    if (addr < 0x2000) {
-      value = this.mem[addr & 0x7FF];
-    } else if (addr < 0x4000) {
-      const reg = addr & 0x0007;
-      this.nes.catchUp();
-      value = this.nes.ppu.readRegister(reg);
-    } else if (addr < 0x4020) {
-      if (addr === 0x4016) {
-        value = this.nes.controllers[1].read();
-        this.controller1Read = true; // Mark that controller 1 was read this instruction
-      } else if (addr === 0x4017) {
-        this.nes.catchUp(); // Synchronize PPU for accurate beam detection
-        // Controller 2 (D0-D4) + Zapper (D3, D4)
-        let ret = this.nes.controllers[2].read();
-        this.controller2Read = true; // Mark that controller 2 was read this instruction
+    // Soft reset keeps A/X/Y, sets I, and decrements SP by 3.
+    this._setFlags(FLAG_INTERRUPT);
+    this.SP = (this.SP - 3) & 0xFF;
 
-        // Zapper Handling
-        const zapper = this.nes.zapper;
-        let lightDetected = false;
+    this._setMasterClockDivider(this._resolveRegion());
 
-        // Check if beam is at zapper position (with tolerance)
-        // Real Zapper has a lens with a radius of ~5-10 pixels
-        const ppu = this.nes.ppu;
-        const radius = 8;
-
-        // Check if the beam (scanline) is within vertical range of the sensor
-        if (ppu.scanline < 240 && Math.abs(ppu.scanline - zapper.y) <= radius) {
-            // PPU cycle is incremented at the end of step().
-            // renderPixel() uses (cycle - 1) to determine X.
-            // So if cycle is C, the last pixel rendered was at C - 2.
-            const currentX = ppu.cycle - 2;
-
-            // Check if the beam (dot) is within horizontal range of the sensor
-            if (currentX >= 0 && currentX < 256 && Math.abs(currentX - zapper.x) <= radius) {
-                // Check brightness of the pixel CURRENTLY being drawn by the beam
-                const pixel = ppu.framebuffer[(ppu.scanline << 8) + currentX];
-                const r = (pixel >> 16) & 0xFF;
-                const g = (pixel >> 8) & 0xFF;
-                const b = pixel & 0xFF;
-                if ((r + g + b) > 500) lightDetected = true; // Brightness threshold
-            }
-        }
-
-        if (!lightDetected) ret |= 0x08; // Bit 3: 0=Detected, 1=Not Detected
-        if (!zapper.fired) ret |= 0x10;  // Bit 4: 0=Pulled, 1=Released
-
-        value = ret;
-      } else if (this.nes.papu) {
-        value = this.nes.papu.readReg(addr);
-        // APU returns undefined for unimplemented registers - use open bus
-        if (value === undefined) {
-          value = this.dataBus;
-        }
-      } else {
-        // Open bus: return last value on data bus
-        value = this.dataBus;
-      }
-    } else {
-      value = this.nes.mmap.cpuRead(addr);
-      if (value === undefined) {
-        value = this.dataBus;
-      }
-    }
-
-    // Update data bus latch with the value read
-    this.dataBus = value;
-    return value;
+    this._setResetVector();
+    this._startupDelayCycles();
   }
 
-  cpuRead16bit(addr) {
-    // MMC5 needs to know when the NMI vector is read to reset its frame state
-    if (addr === 0xFFFA && this.nes.mmap && this.nes.mmap.onNmiVectorRead) {
-        this.nes.mmap.onNmiVectorRead();
-    }
-    return this.cpuRead(addr) | (this.cpuRead(addr + 1) << 8);
-  }
-
-  cpuWrite(addr, val) {
-    // Update data bus latch on all writes
-    this.dataBus = val;
-
-    if (addr === 0x4014 && this.nes && typeof this.nes.recordPpuTraceAccess === 'function') {
-      this.nes.recordPpuTraceAccess('WRITE', addr, val, this.REG_PC);
-    }
-
-    // RAM $0000-$1FFF (mirrored every $800)
-    if (addr < 0x2000) {
-      this.mem[addr & 0x7FF] = val;
-      return;
-    }
-
-    // PPU registers $2000-$3FFF (mirrored every 8 bytes)
-    if (addr < 0x4000) {
-      const reg = addr & 0x0007;
-      this.nes.catchUp();
-      this.nes.ppu.writeRegister(reg, val);
-      return;
-    }
-
-    // APU and I/O $4000-$401F
-    if (addr < 0x4020) {
-      if (addr === 0x4014) {
-        this.nes.catchUp();
-        this.nes.ppu.doDMA(val);
-        return;
-      }
-      if (addr === 0x4016) {
-        // Pass the value to strobe() so controllers can track strobe state
-        this.nes.controllers[1].strobe(val);
-        this.nes.controllers[2].strobe(val);
-        return;
-      }
-      if (this.nes.papu) this.nes.papu.writeReg(addr, val);
-      return;
-    }
-
-    this.nes.catchUp();
-    this.nes.mmap.cpuWrite(addr, val);
-  }
-
-  // =================================================================
-  // CORE EMULATION
-  // =================================================================
-  step() {
-    if (this.cyclesToHalt > 0) {
-      this.cyclesToHalt--;
-      this.cycleCount++;
-      return 1;
-    }
-
-    return this.emulate();
-  }
-
-  emulate() {
-    let temp, add, val;
-
-    if (this.irqRequested) {
-      temp = this.F_CARRY | ((this.F_ZERO === 0 ? 1 : 0) << 1) |
-        (this.F_INTERRUPT << 2) | (this.F_DECIMAL << 3) |
-        (0 << 4) | (this.F_NOTUSED << 5) |
-        (this.F_OVERFLOW << 6) | (this.F_SIGN << 7);
-
-      this.REG_PC_NEW = this.REG_PC;
-      this.F_INTERRUPT_NEW = this.F_INTERRUPT;
-
-      switch (this.irqType) {
-        case 0:
-          if (this.F_INTERRUPT !== 0) break;
-          this.doIrq(temp);
-          break;
-        case 1:
-          this.doNonMaskableInterrupt(temp);
-          break;
-        case 2:
-          this.doResetInterrupt();
-          break;
-      }
-      this.REG_PC = this.REG_PC_NEW;
-      this.F_INTERRUPT = this.F_INTERRUPT_NEW;
-      this.F_BRK = this.F_BRK_NEW;
-
-      // Only clear the request flag for edge-triggered (NMI) or one-shot (Reset) interrupts.
-      // Level-triggered IRQs (type 0) must remain set until explicitly cleared by the device.
-      if (this.irqType !== 0) {
-        this.irqRequested = false;
-      }
-    }
-
-    const mmap = this.nes.mmap;
-    if (!mmap) return 32;
-
-    // REG_PC here is treated as the current instruction address
-    const opaddr = (this.REG_PC + 1) & 0xffff;
-    const opcode = this.cpuRead(opaddr);
-    const opinf = OPDATA[opcode];
-    if (mmap) {
-      if (typeof mmap.recordCpuInstruction === 'function') {
-        mmap.recordCpuInstruction(opaddr, opcode);
-      }
-      if (typeof mmap.recordCpuInstructionHit === 'function') {
-        mmap.recordCpuInstructionHit(opaddr, opcode);
-      }
-    }
-
-    const opSize = (opinf >> 16) & 0xff;
-
-    let cycleCount = opinf >> 24;
-    const addrMode = (opinf >> 8) & 0xff;
-    this.cycleOffset = cycleCount - 1; // Default offset, adjusted below for page crosses
-    this.REG_PC = (this.REG_PC + opSize) & 0xffff;
-
-    let addr = 0;
-    let pageCrossCycles = 0;
-    switch (addrMode) {
-      case 0: addr = this.cpuRead(opaddr + 1); break;                  // ZP
-      case 1: { // REL
-        const rel = this.cpuRead(opaddr + 1);
-        const base = (this.REG_PC + 1) & 0xFFFF; // Base is the address of the instruction AFTER the branch
-        addr = base + (rel < 0x80 ? rel : rel - 256);
-        break;
-      }
-      case 2: break;
-      case 3: addr = this.cpuRead16bit(opaddr + 1); break;             // ABS
-      case 4: addr = this.REG_ACC; break;                              // ACC
-      case 5: addr = this.REG_PC; break;                               // IMP (not used)
-      case 6: addr = (this.cpuRead(opaddr + 1) + this.REG_X) & 0xff; break; // ZPX
-      case 7: addr = (this.cpuRead(opaddr + 1) + this.REG_Y) & 0xff; break; // ZPY
-      case 8: // ABSX
-        addr = this.cpuRead16bit(opaddr + 1);
-        if ((addr & 0xff00) !== ((addr + this.REG_X) & 0xff00)) {
-          pageCrossCycles = 1;
-          this.cpuRead((addr & 0xff00) | ((addr + this.REG_X) & 0xff));
-        }
-        addr += this.REG_X;
-        break;
-      case 9: // ABSY
-        addr = this.cpuRead16bit(opaddr + 1);
-        if ((addr & 0xff00) !== ((addr + this.REG_Y) & 0xff00)) {
-          pageCrossCycles = 1;
-          this.cpuRead((addr & 0xff00) | ((addr + this.REG_Y) & 0xff));
-        }
-        addr += this.REG_Y;
-        break;
-      case 10: { // PRE-indexed indirect (d,x)
-        const ptr = (this.cpuRead(opaddr + 1) + this.REG_X) & 0xff;
-        const lo = this.cpuRead(ptr);
-        const hi = this.cpuRead((ptr + 1) & 0xff); // Wrap ZP
-        addr = lo | (hi << 8);
-        break;
-      }
-      case 11: { // POST-indexed indirect (d),y
-        const ptr = this.cpuRead(opaddr + 1);
-        const lo = this.cpuRead(ptr);
-        const hi = this.cpuRead((ptr + 1) & 0xff); // Wrap ZP
-        addr = lo | (hi << 8);
-        if ((addr & 0xff00) !== ((addr + this.REG_Y) & 0xff00)) {
-          pageCrossCycles = 1;
-          this.cpuRead((addr & 0xff00) | ((addr + this.REG_Y) & 0xff));
-        }
-        addr += this.REG_Y;
-        break;
-      }
-      case 12: 
-        addr = this.cpuRead16bit(opaddr + 1);
-        const lo = addr;
-        const hi = (addr & 0xff00) | ((addr + 1) & 0xff);
-        addr = this.cpuRead(lo) | (this.cpuRead(hi) << 8);
-        break;
-    }
-    addr &= 0xffff;
-
-    // Adjust cycle offset for read instructions that cross a page boundary.
-    // This ensures the PPU is synchronized to the correct cycle before the read occurs,
-    // as the read is delayed by one cycle when a page is crossed.
-    const instructionType = opinf & 0xff;
-    const readInstructionsWithPenalty = [0, 1, 17, 23, 29, 30, 31, 34, 43, 60]; // ADC, AND, CMP, EOR, LDA, LDX, LDY, ORA, SBC, LAX
-    if (pageCrossCycles !== 0 && readInstructionsWithPenalty.includes(instructionType)) {
-        this.cycleOffset++;
-    }
-
-    let branchCycles = 0;
-
-    switch (instructionType) {
-      case 0: val = this.cpuRead(addr); temp = this.REG_ACC + val + this.F_CARRY; this.F_OVERFLOW = ((this.REG_ACC ^ val) & 0x80) === 0 && ((this.REG_ACC ^ temp) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp > 255 ? 1 : 0; this.F_SIGN = (temp >> 7) & 1; temp &= 0xff; this.F_ZERO = temp; this.REG_ACC = temp; break;
-      case 1: this.REG_ACC &= this.cpuRead(addr); this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break;
-      case 2: if (addrMode === 4) { this.F_CARRY = (this.REG_ACC >> 7) & 1; this.REG_ACC = (this.REG_ACC << 1) & 0xff; this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; } else { temp = this.cpuRead(addr); this.cpuWrite(addr, temp); this.F_CARRY = (temp >> 7) & 1; temp = (temp << 1) & 0xff; this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp; this.cpuWrite(addr, temp); } break;
-      case 3: if (this.F_CARRY === 0) { branchCycles = ((this.REG_PC + 1) & 0xff00) !== (addr & 0xff00) ? 2 : 1; this.REG_PC = addr - 1; } break;
-      case 4: if (this.F_CARRY === 1) { branchCycles = ((this.REG_PC + 1) & 0xff00) !== (addr & 0xff00) ? 2 : 1; this.REG_PC = addr - 1; } break;
-      case 5: if (this.F_ZERO === 0) { branchCycles = ((this.REG_PC + 1) & 0xff00) !== (addr & 0xff00) ? 2 : 1; this.REG_PC = addr - 1; } break;
-      // BIT
-      case 6: temp = this.cpuRead(addr); this.F_SIGN = (temp >> 7) & 1; this.F_OVERFLOW = (temp >> 6) & 1; this.F_ZERO = temp & this.REG_ACC; break;
-      case 7: if (this.F_SIGN === 1) { branchCycles = ((this.REG_PC + 1) & 0xff00) !== (addr & 0xff00) ? 2 : 1; this.REG_PC = addr - 1; } break;
-      case 8: if (this.F_ZERO !== 0) { branchCycles = ((this.REG_PC + 1) & 0xff00) !== (addr & 0xff00) ? 2 : 1; this.REG_PC = addr - 1; } break;
-      case 9: if (this.F_SIGN === 0) { branchCycles = ((this.REG_PC + 1) & 0xff00) !== (addr & 0xff00) ? 2 : 1; this.REG_PC = addr - 1; } break;
-      case 10:
-        this.REG_PC += 2; // Eats a byte like the real thing
-        this.push((this.REG_PC >> 8) & 0xff);
-        this.push(this.REG_PC & 0xff);
-        this.F_BRK = 1;
-        this.push(this.getStatus());
-        this.F_INTERRUPT = 1;
-        this.REG_PC = this.cpuRead16bit(0xfffe) - 1;
-        break;
-      case 11: if (this.F_OVERFLOW === 0) { branchCycles = ((this.REG_PC + 1) & 0xff00) !== (addr & 0xff00) ? 2 : 1; this.REG_PC = addr - 1; } break;
-      case 12: if (this.F_OVERFLOW === 1) { branchCycles = ((this.REG_PC + 1) & 0xff00) !== (addr & 0xff00) ? 2 : 1; this.REG_PC = addr - 1; } break;
-      case 13: this.F_CARRY = 0; break;
-      case 14: this.F_DECIMAL = 0; break;
-      case 15: this.F_INTERRUPT = 0; break;
-      case 16: this.F_OVERFLOW = 0; break;
-      case 17: temp = this.REG_ACC - this.cpuRead(addr); this.F_CARRY = temp >= 0 ? 1 : 0; this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp & 0xff; break;
-      case 18: temp = this.REG_X - this.cpuRead(addr); this.F_CARRY = temp >= 0 ? 1 : 0; this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp & 0xff; break;
-      case 19: temp = this.REG_Y - this.cpuRead(addr); this.F_CARRY = temp >= 0 ? 1 : 0; this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp & 0xff; break;
-      case 20: val = this.cpuRead(addr); this.cpuWrite(addr, val); temp = (val - 1) & 0xff; this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp; this.cpuWrite(addr, temp); break;
-      case 21: this.REG_X = (this.REG_X - 1) & 0xff; this.F_SIGN = (this.REG_X >> 7) & 1; this.F_ZERO = this.REG_X; break;
-      case 22: this.REG_Y = (this.REG_Y - 1) & 0xff; this.F_SIGN = (this.REG_Y >> 7) & 1; this.F_ZERO = this.REG_Y; break;
-      case 23: this.REG_ACC = (this.cpuRead(addr) ^ this.REG_ACC) & 0xff; this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break;
-      case 24: val = this.cpuRead(addr); this.cpuWrite(addr, val); temp = (val + 1) & 0xff; this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp; this.cpuWrite(addr, temp); break;
-      case 25: this.REG_X = (this.REG_X + 1) & 0xff; this.F_SIGN = (this.REG_X >> 7) & 1; this.F_ZERO = this.REG_X; break;
-      case 26: this.REG_Y = (this.REG_Y + 1) & 0xff; this.F_SIGN = (this.REG_Y >> 7) & 1; this.F_ZERO = this.REG_Y; break;
-      case 27: this.REG_PC = addr - 1; break;
-      case 28:
-        const pcToPush = this.REG_PC; // JSR pushes the address of the last byte of the instruction
-        this.push((pcToPush >> 8) & 0xff);
-        this.push(pcToPush & 0xff);
-        this.REG_PC = addr - 1;
-        break;
-      case 29: this.REG_ACC = this.cpuRead(addr); this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break;
-      case 30: this.REG_X = this.cpuRead(addr); this.F_SIGN = (this.REG_X >> 7) & 1; this.F_ZERO = this.REG_X; break;
-      case 31: this.REG_Y = this.cpuRead(addr); this.F_SIGN = (this.REG_Y >> 7) & 1; this.F_ZERO = this.REG_Y; break;
-      case 32: if (addrMode === 4) { this.F_CARRY = this.REG_ACC & 1; this.REG_ACC >>= 1; temp = this.REG_ACC; } else { temp = this.cpuRead(addr); this.cpuWrite(addr, temp); this.F_CARRY = temp & 1; temp >>= 1; this.cpuWrite(addr, temp); } this.F_SIGN = 0; this.F_ZERO = temp; break;
-      case 33: break;
-      case 34: this.REG_ACC = (this.cpuRead(addr) | this.REG_ACC) & 0xff; this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break;
-      case 35: this.push(this.REG_ACC); break;
-      case 36: this.push(this.getStatus() | 0x10); break; // PHP pushes with B flag (bit 4) set
-      case 37: this.REG_ACC = this.pull(); this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break;
-      case 38: this.setStatus(this.pull()); break;
-      case 39: if (addrMode === 4) { temp = this.REG_ACC; add = this.F_CARRY; this.F_CARRY = (temp >> 7) & 1; temp = ((temp << 1) & 0xff) + add; this.REG_ACC = temp; } else { temp = this.cpuRead(addr); this.cpuWrite(addr, temp); add = this.F_CARRY; this.F_CARRY = (temp >> 7) & 1; temp = ((temp << 1) & 0xff) + add; this.cpuWrite(addr, temp); } this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp; break;
-      case 40: if (addrMode === 4) { add = this.F_CARRY << 7; this.F_CARRY = this.REG_ACC & 1; temp = (this.REG_ACC >> 1) + add; this.REG_ACC = temp; } else { temp = this.cpuRead(addr); this.cpuWrite(addr, temp); add = this.F_CARRY << 7; this.F_CARRY = temp & 1; temp = (temp >> 1) + add; this.cpuWrite(addr, temp); } this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp; break;
-      case 41: {
-        const spBefore = this.REG_SP;
-        this.setStatus(this.pull());
-        this.REG_PC = this.pull();
-        this.REG_PC += this.pull() << 8;
-        this.inNMI = false; // Clear NMI flag
-        this.REG_PC--;
-        break;
-      }
-      case 42: // RTS
-        this.REG_PC = this.pull() | (this.pull() << 8);
-        break;
-      case 43: val = this.cpuRead(addr); temp = this.REG_ACC - val - (1 - this.F_CARRY); this.F_SIGN = (temp >> 7) & 1; this.F_OVERFLOW = ((this.REG_ACC ^ temp) & 0x80) !== 0 && ((this.REG_ACC ^ val) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp >= 0 ? 1 : 0; temp &= 0xff; this.F_ZERO = temp; this.REG_ACC = temp; break;
-      case 44: this.F_CARRY = 1; break;
-      case 45: this.F_DECIMAL = 1; break;
-      case 46: this.F_INTERRUPT = 1; break;
-      case 47: this.cpuWrite(addr, this.REG_ACC); break;
-      case 48: this.cpuWrite(addr, this.REG_X); break;
-      case 49: this.cpuWrite(addr, this.REG_Y); break;
-      case 50: this.REG_X = this.REG_ACC; this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break;
-      case 51: this.REG_Y = this.REG_ACC; this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break;
-      case 52: this.REG_X = this.REG_SP & 0xff; this.F_SIGN = (this.REG_SP >> 7) & 1; this.F_ZERO = this.REG_X; break;
-      case 53: this.REG_ACC = this.REG_X; this.F_SIGN = (this.REG_X >> 7) & 1; this.F_ZERO = this.REG_X; break;
-      case 54: this.REG_SP = this.REG_X & 0xff; break;
-      case 55: this.REG_ACC = this.REG_Y; this.F_SIGN = (this.REG_Y >> 7) & 1; this.F_ZERO = this.REG_Y; break;
-      
-      // Illegal opcodes
-      case 56: temp = this.REG_ACC & this.cpuRead(addr); this.F_CARRY = temp & 1; this.REG_ACC = this.F_ZERO = temp >> 1; this.F_SIGN = 0; break;
-      case 57: this.REG_ACC = this.F_ZERO = this.REG_ACC & this.cpuRead(addr); this.F_CARRY = this.F_SIGN = (this.REG_ACC >> 7) & 1; break;
-      case 58: temp = this.REG_ACC & this.cpuRead(addr); this.REG_ACC = this.F_ZERO = (temp >> 1) + (this.F_CARRY << 7); this.F_SIGN = this.F_CARRY; this.F_CARRY = (temp >> 7) & 1; this.F_OVERFLOW = ((temp >> 7) ^ (temp >> 6)) & 1; break; // Unofficial AXS, not RMW
-      case 59: val = this.cpuRead(addr); temp = (this.REG_X & this.REG_ACC) - val; this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp & 0xff; this.F_OVERFLOW = ((this.REG_X ^ temp) & 0x80) !== 0 && ((this.REG_X ^ val) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp < 0 ? 0 : 1; this.REG_X = temp & 0xff; break;
-      case 60: this.REG_ACC = this.REG_X = this.F_ZERO = this.cpuRead(addr); this.F_SIGN = (this.REG_ACC >> 7) & 1; break;
-      case 61: this.cpuWrite(addr, this.REG_ACC & this.REG_X); break;
-      case 62: val = this.cpuRead(addr); this.cpuWrite(addr, val); temp = (val - 1) & 0xff; this.cpuWrite(addr, temp); temp = this.REG_ACC - temp; this.F_CARRY = temp >= 0 ? 1 : 0; this.F_SIGN = (temp >> 7) & 1; this.F_ZERO = temp & 0xff; break; // DCP
-      case 63: val = this.cpuRead(addr); this.cpuWrite(addr, val); temp = (val + 1) & 0xff; this.cpuWrite(addr, temp); val = temp; temp = this.REG_ACC - val - (1 - this.F_CARRY); this.F_SIGN = (temp >> 7) & 1; this.F_OVERFLOW = ((this.REG_ACC ^ temp) & 0x80) !== 0 && ((this.REG_ACC ^ val) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp >= 0 ? 1 : 0; temp &= 0xff; this.F_ZERO = temp; this.REG_ACC = temp; break; // ISC
-      case 64: val = this.cpuRead(addr); this.cpuWrite(addr, val); add = this.F_CARRY; this.F_CARRY = (val >> 7) & 1; temp = ((val << 1) & 0xff) + add; this.cpuWrite(addr, temp); this.REG_ACC &= temp; this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break; // RLA
-      case 65: val = this.cpuRead(addr); this.cpuWrite(addr, val); add = this.F_CARRY << 7; this.F_CARRY = val & 1; temp = (val >> 1) + add; this.cpuWrite(addr, temp); val = temp; temp = this.REG_ACC + val + this.F_CARRY; this.F_OVERFLOW = ((this.REG_ACC ^ val) & 0x80) === 0 && ((this.REG_ACC ^ temp) & 0x80) !== 0 ? 1 : 0; this.F_CARRY = temp > 255 ? 1 : 0; this.F_SIGN = (temp >> 7) & 1; temp &= 0xff; this.F_ZERO = temp; this.REG_ACC = temp; break; // RRA
-      case 66: val = this.cpuRead(addr); this.cpuWrite(addr, val); this.F_CARRY = (val >> 7) & 1; temp = (val << 1) & 0xff; this.cpuWrite(addr, temp); this.REG_ACC |= temp; this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break; // SLO
-      case 67: val = this.cpuRead(addr); this.cpuWrite(addr, val); this.F_CARRY = val & 1; temp = val >> 1; this.cpuWrite(addr, temp); this.REG_ACC ^= temp; this.F_SIGN = (this.REG_ACC >> 7) & 1; this.F_ZERO = this.REG_ACC; break; // SRE
-      case 69: this.cpuRead(addr); break;
-      case 68: break;
-      default: break;
-    }
-
-    // Add page-crossing penalty cycles for specific read instructions
-    // Apply page cross penalty for read instructions. The check for addrMode 11 was incorrect.
-    if (readInstructionsWithPenalty.includes(instructionType)) {
-        cycleCount += pageCrossCycles;
-    }
-
-    // Add branch penalty cycles
-    cycleCount += branchCycles;
-
-    // Track total cycles for mapper timing
-    this.cycleCount += cycleCount;
-
-    // Clock controllers after instruction completes
-    // This allows double-reads within the same instruction to get the same value
-    this.stepControllers();
-
-    this.instructionCount++;
-    return cycleCount;
-  }
-
-  stepControllers() {
-    // Only clock controllers that were actually read during this instruction
-    // This prevents advancing the shift register on every instruction
-    if (this.controller1Read) {
-      this.nes.controllers[1].clock();
-      this.controller1Read = false;
-    }
-    if (this.controller2Read) {
-      this.nes.controllers[2].clock();
-      this.controller2Read = false;
-    }
-  }
+  // ===========================================================================
+  // IRQ/NMI INTERFACE
+  // ===========================================================================
 
   requestIrq(type) {
-    if (this.irqRequested && type === CPU.IRQ_NORMAL) return;
-    this.irqRequested = true;
-    this.irqType = type;
+    const irqType = (type | 0) & 0xFF;
+    if (irqType === this.IRQ_NMI || irqType === 1) {
+      this.nmiFlag = true;
+    } else {
+      this.irqFlag = (this.irqFlag | irqType) & 0xFF;
+    }
   }
 
   clearIrq(type) {
-    if (this.irqRequested && this.irqType === type) {
-      this.irqRequested = false;
+    const irqType = (type | 0) & 0xFF;
+    if (irqType === this.IRQ_NMI || irqType === 1) {
+      this.nmiFlag = false;
+    } else {
+      this.irqFlag = (this.irqFlag & (~irqType)) & 0xFF;
     }
   }
 
-  push(value) {
-    this.cpuWrite(0x100 | this.REG_SP, value);
-    this.REG_SP = (this.REG_SP - 1) & 0xff;
+  setNmiFlag() {
+    this.nmiFlag = true;
   }
 
-  pull() {
-    this.REG_SP = (this.REG_SP + 1) & 0xff;
-    return this.cpuRead(0x100 | this.REG_SP);
+  clearNmiFlag() {
+    this.nmiFlag = false;
   }
 
-  haltCycles(cycles) { this.cyclesToHalt += cycles; }
-
-  doNonMaskableInterrupt(status) {
-    const nmiVector = this.cpuRead16bit(0xfffa);
-    const pcToPush = (this.REG_PC_NEW + 1) & 0xFFFF; // Push the actual PC, not PC-1
-    this.push((pcToPush >> 8) & 0xff);
-    this.push(pcToPush & 0xff);
-    this.push(status);
-    this.REG_PC_NEW = nmiVector - 1;
-    this.inNMI = true; // Track that we're in NMI handler
-    this.F_INTERRUPT_NEW = 1; // NMI disables IRQs
-    this.nmiStartInstruction = this.instructionCount;
+  setIrqMask(mask) {
+    this.irqMask = mask & 0xFF;
   }
 
-  doResetInterrupt() {
-    const lo = this.cpuRead(0xFFFC);
-    const hi = this.cpuRead(0xFFFD);
-    const vec = lo | (hi << 8);
-
-    this.REG_PC_NEW = vec - 1;
+  setIrqSource(source) {
+    this.irqFlag = (this.irqFlag | (source & 0xFF)) & 0xFF;
   }
 
-  doIrq(status) {
-    const pcToPush = (this.REG_PC_NEW + 1) & 0xFFFF; // Push the actual PC, not PC-1
-    this.push((pcToPush >> 8) & 0xff);
-    this.push(pcToPush & 0xff);
-    this.push(status);
-    this.F_INTERRUPT_NEW = 1;
-    this.F_BRK_NEW = 0;
-    this.REG_PC_NEW = this.cpuRead16bit(0xfffe) - 1;
+  clearIrqSource(source) {
+    this.irqFlag = (this.irqFlag & (~source)) & 0xFF;
   }
 
-  getStatus() {
-    // F_ZERO stores the result value (0-255), zero flag is SET when F_ZERO === 0
-    const zeroFlag = (this.F_ZERO === 0) ? 1 : 0;
-    return this.F_CARRY | (zeroFlag << 1) | (this.F_INTERRUPT << 2) | (this.F_DECIMAL << 3) | (this.F_BRK << 4) | (this.F_NOTUSED << 5) | (this.F_OVERFLOW << 6) | (this.F_SIGN << 7);
+  hasIrqSource(source) {
+    return (this.irqFlag & (source & 0xFF)) !== 0;
   }
 
-  setStatus(st) {
-    this.F_CARRY = st & 1;
-    // Zero flag bit is 1 when result was zero, so F_ZERO should be 0 when bit is set
-    this.F_ZERO = ((st >> 1) & 1) ? 0 : 1;
-    this.F_INTERRUPT = (st >> 2) & 1;
-    this.F_DECIMAL = (st >> 3) & 1;
-    this.F_BRK = (st >> 4) & 1;
-    this.F_NOTUSED = 1;
-    this.F_OVERFLOW = (st >> 6) & 1;
-    this.F_SIGN = (st >> 7) & 1;
+  // ===========================================================================
+  // CYCLE PIPELINE
+  // ===========================================================================
+
+  _clockPpuFromCpuCycle() {
+    const ppu = this.nes ? this.nes.ppu : null;
+    if (!ppu) {
+      return;
+    }
+
+    if (typeof ppu.clockCpuCycle === "function") {
+      ppu.clockCpuCycle();
+    } else if (typeof ppu.step === "function") {
+      // Legacy fallback
+      ppu.step();
+      ppu.step();
+      ppu.step();
+    }
   }
+
+  _clockMapperFromCpuCycle() {
+    const mapper = this.nes ? this.nes.mmap : null;
+    if (!mapper) {
+      return;
+    }
+
+    if (typeof mapper.step === "function") {
+      mapper.step(1);
+    }
+
+    if (typeof mapper.cpuClock === "function") {
+      mapper.cpuClock(1);
+    }
+  }
+
+  _startCycle(forRead = true) {
+    this.cycleCount++;
+    this.cycleOffset++;
+
+    this._clockPpuFromCpuCycle();
+    this._clockMapperFromCpuCycle();
+  }
+
+  _endCycle(forRead = true) {
+    // NMI edge detector (sampled at end of each cycle)
+    this.prevNeedNmi = this.needNmi;
+
+    if (!this.prevNmiFlag && this.nmiFlag) {
+      this.needNmi = true;
+    }
+    this.prevNmiFlag = this.nmiFlag;
+
+    // IRQ level detection
+    this.prevRunIrq = this.runIrq;
+    this.runIrq = ((this.irqFlag & this.irqMask) !== 0) && !this._checkFlag(FLAG_INTERRUPT);
+  }
+
+  haltCycles(n) {
+    this.cyclesToHalt += (n | 0);
+  }
+
+  _consumeHaltCycles() {
+    while (this.cyclesToHalt > 0) {
+      this.cyclesToHalt--;
+      this._startCycle(true);
+      this._endCycle(true);
+    }
+  }
+
+  _processPendingDma(readAddress = 0, opType = 0) {
+    // Mesen handles sprite/DMC DMA interleaving here.
+    // In this emulator, DMA uses haltCycles() + direct transfers (PPU/APU side).
+  }
+
+  // ===========================================================================
+  // BUS ACCESS
+  // ===========================================================================
+
+  _rawRead(addr) {
+    return this._read(addr & 0xFFFF);
+  }
+
+  cpuRead(addr) {
+    return this._read(addr & 0xFFFF);
+  }
+
+  cpuWrite(addr, value) {
+    this._write(addr & 0xFFFF, value & 0xFF);
+  }
+
+  memoryRead(addr, opType = 0) {
+    const effectiveAddr = addr & 0xFFFF;
+
+    this._processPendingDma(effectiveAddr, opType);
+
+    this._startCycle(true);
+    const value = this._read(effectiveAddr);
+    this._endCycle(true);
+
+    return value & 0xFF;
+  }
+
+  memoryWrite(addr, value, opType = 0) {
+    const effectiveAddr = addr & 0xFFFF;
+    const writeValue = value & 0xFF;
+
+    this.cpuWrite = true;
+    this._startCycle(false);
+    this._write(effectiveAddr, writeValue);
+    this._endCycle(false);
+    this.cpuWrite = false;
+  }
+
+  _read(addr) {
+    const address = addr & 0xFFFF;
+    let value;
+
+    if (address < 0x2000) {
+      value = this.ram[address & 0x07FF];
+      this.dataBus = value & 0xFF;
+      this.mem[address] = this.dataBus;
+      return this.dataBus;
+    }
+
+    if (address < 0x4000) {
+      value = this.nes && this.nes.ppu ? this.nes.ppu.readRegister(address & 0x07) : this.dataBus;
+      this.dataBus = (value === undefined || value === null) ? this.dataBus : (value & 0xFF);
+      this.mem[address] = this.dataBus;
+      return this.dataBus;
+    }
+
+    if (address < 0x4018) {
+      value = this._readIORegister(address);
+      this.dataBus = (value === undefined || value === null) ? this.dataBus : (value & 0xFF);
+      this.mem[address] = this.dataBus;
+      return this.dataBus;
+    }
+
+    if (address < 0x6000) {
+      if (this.nes && this.nes.mmap && typeof this.nes.mmap.cpuRead === "function") {
+        value = this.nes.mmap.cpuRead(address);
+        if (value !== undefined && value !== null) {
+          this.dataBus = value & 0xFF;
+          this.mem[address] = this.dataBus;
+          return this.dataBus;
+        }
+      }
+      this.mem[address] = this.dataBus;
+      return this.dataBus;
+    }
+
+    if (this.nes && this.nes.mmap && typeof this.nes.mmap.cpuRead === "function") {
+      value = this.nes.mmap.cpuRead(address);
+      if (value !== undefined && value !== null) {
+        this.dataBus = value & 0xFF;
+        this.mem[address] = this.dataBus;
+        return this.dataBus;
+      }
+    }
+
+    this.mem[address] = this.dataBus;
+    return this.dataBus;
+  }
+
+  _write(addr, value) {
+    const address = addr & 0xFFFF;
+    const writeValue = value & 0xFF;
+
+    this.dataBus = writeValue;
+    this.mem[address] = writeValue;
+
+    if (address < 0x2000) {
+      this.ram[address & 0x07FF] = writeValue;
+      return;
+    }
+
+    if (address < 0x4000) {
+      if (this.nes && this.nes.ppu) {
+        this.nes.ppu.writeRegister(address & 0x07, writeValue);
+      }
+      return;
+    }
+
+    if (address < 0x4018) {
+      this._writeIORegister(address, writeValue);
+      return;
+    }
+
+    if (this.nes && this.nes.mmap && typeof this.nes.mmap.cpuWrite === "function") {
+      this.nes.mmap.cpuWrite(address, writeValue);
+    }
+  }
+
+  _readIORegister(addr) {
+    const address = addr & 0xFFFF;
+
+    switch (address) {
+      case 0x4015:
+        if (this.nes && this.nes.papu && typeof this.nes.papu.readReg === "function") {
+          const value = this.nes.papu.readReg(address);
+          if (value !== undefined && value !== null) {
+            return value & 0xFF;
+          }
+        }
+        return this.dataBus;
+
+      case 0x4016: {
+        if (this.nes && this.nes.controllers && this.nes.controllers[1]) {
+          const value = this.nes.controllers[1].read() & 0xFF;
+          this.nes.controllers[1].clock();
+          return value;
+        }
+        return this.dataBus;
+      }
+
+      case 0x4017: {
+        if (this.nes && this.nes.controllers && this.nes.controllers[2]) {
+          const value = this.nes.controllers[2].read() & 0xFF;
+          this.nes.controllers[2].clock();
+          return value;
+        }
+        return this.dataBus;
+      }
+
+      default:
+        return this.dataBus;
+    }
+  }
+
+  _writeIORegister(addr, value) {
+    const address = addr & 0xFFFF;
+    const writeValue = value & 0xFF;
+
+    switch (address) {
+      case 0x4014:
+        this._runSpriteDma(writeValue);
+        return;
+
+      case 0x4016:
+        if (this.nes && this.nes.controllers) {
+          this.nes.controllers[1].strobe(writeValue);
+          this.nes.controllers[2].strobe(writeValue);
+        }
+        return;
+
+      default:
+        if (this.nes && this.nes.papu && typeof this.nes.papu.writeReg === "function") {
+          this.nes.papu.writeReg(address, writeValue);
+        }
+        return;
+    }
+  }
+
+  _runSpriteDma(page) {
+    if (this.nes && this.nes.ppu && typeof this.nes.ppu.doDMA === "function") {
+      this.nes.ppu.doDMA(page & 0xFF);
+    }
+  }
+
+  // ===========================================================================
+  // EXECUTION
+  // ===========================================================================
+
+  step() {
+    const startCycles = this.cycleCount;
+    this.cycleOffset = 0;
+
+    this._consumeHaltCycles();
+    this._exec();
+
+    this.cyclesThisStep = this.cycleCount - startCycles;
+    return this.cyclesThisStep;
+  }
+
+  _exec() {
+    const opcode = this._getOpcode();
+    this.instAddrMode = this.addrModeTable[opcode];
+    this.operand = this._fetchOperand(this.instAddrMode);
+
+    this.opTable[opcode].call(this);
+
+    if (this.prevRunIrq || this.prevNeedNmi) {
+      this._IRQ();
+    }
+  }
+
+  _IRQ() {
+    // PAL does a DMA poll at interrupt sequence start.
+    if (this._resolveRegion() === "pal") {
+      this._processPendingDma(this.PC, 0);
+    }
+
+    this._dummyRead();
+    this._dummyRead();
+    this._pushWord(this.PC);
+
+    if (this.needNmi) {
+      this.needNmi = false;
+      this._push((this.P | FLAG_RESERVED) & 0xFF);
+      this._setFlags(FLAG_INTERRUPT);
+      this.PC = this._memoryReadWord(NMI_VECTOR) & 0xFFFF;
+    } else {
+      this._push((this.P | FLAG_RESERVED) & 0xFF);
+      this._setFlags(FLAG_INTERRUPT);
+      this.PC = this._memoryReadWord(IRQ_VECTOR) & 0xFFFF;
+    }
+  }
+
+  // ===========================================================================
+  // FETCH / DECODE HELPERS
+  // ===========================================================================
+
+  _getOpcode() {
+    const opcode = this.memoryRead(this.PC) & 0xFF;
+    this.PC = (this.PC + 1) & 0xFFFF;
+    return opcode;
+  }
+
+  _dummyRead() {
+    this.memoryRead(this.PC);
+  }
+
+  _readByte() {
+    const value = this.memoryRead(this.PC) & 0xFF;
+    this.PC = (this.PC + 1) & 0xFFFF;
+    return value;
+  }
+
+  _readWord() {
+    const lo = this._readByte();
+    const hi = this._readByte();
+    return ((hi << 8) | lo) & 0xFFFF;
+  }
+
+  _memoryReadWord(addr) {
+    const lo = this.memoryRead(addr & 0xFFFF) & 0xFF;
+    const hi = this.memoryRead((addr + 1) & 0xFFFF) & 0xFF;
+    return ((hi << 8) | lo) & 0xFFFF;
+  }
+
+  _clearFlags(flags) {
+    this.P = (this.P & (~flags)) & 0xFF;
+  }
+
+  _setFlags(flags) {
+    this.P = (this.P | flags) & 0xFF;
+  }
+
+  _checkFlag(flag) {
+    return (this.P & flag) === flag;
+  }
+
+  _setPS(value) {
+    // Mesen clears B and R bits when restoring P from stack/state.
+    this.P = (value & 0xCF) & 0xFF;
+  }
+
+  _setZeroNegativeFlags(value) {
+    const v = value & 0xFF;
+    if (v === 0) {
+      this._setFlags(FLAG_ZERO);
+    } else if ((v & 0x80) !== 0) {
+      this._setFlags(FLAG_NEGATIVE);
+    }
+  }
+
+  _setRegister(registerName, value) {
+    const v = value & 0xFF;
+    this._clearFlags(FLAG_ZERO | FLAG_NEGATIVE);
+    this._setZeroNegativeFlags(v);
+    this[registerName] = v;
+  }
+
+  _setA(value) {
+    this._setRegister("A", value);
+  }
+
+  _setX(value) {
+    this._setRegister("X", value);
+  }
+
+  _setY(value) {
+    this._setRegister("Y", value);
+  }
+
+  _checkPageCrossedSigned(a, b) {
+    return (((a + b) & 0xFF00) !== (a & 0xFF00));
+  }
+
+  _checkPageCrossedUnsigned(a, b) {
+    return (((a + (b & 0xFF)) & 0xFF00) !== (a & 0xFF00));
+  }
+
+  _push(value) {
+    this.memoryWrite((this.SP + 0x100) & 0x1FF, value & 0xFF);
+    this.SP = (this.SP - 1) & 0xFF;
+  }
+
+  _pushWord(value) {
+    const word = value & 0xFFFF;
+    this._push((word >> 8) & 0xFF);
+    this._push(word & 0xFF);
+  }
+
+  _pop() {
+    this.SP = (this.SP + 1) & 0xFF;
+    return this.memoryRead((0x100 + this.SP) & 0x1FF) & 0xFF;
+  }
+
+  _popWord() {
+    const lo = this._pop();
+    const hi = this._pop();
+    return ((hi << 8) | lo) & 0xFFFF;
+  }
+
+  _getOperandValue() {
+    if (this.instAddrMode >= AM.Zero) {
+      return this.memoryRead(this.operand & 0xFFFF) & 0xFF;
+    }
+    return this.operand & 0xFF;
+  }
+
+  _getIndAddr() {
+    return this._readWord();
+  }
+
+  _getImmediate() {
+    return this._readByte();
+  }
+
+  _getZeroAddr() {
+    return this._readByte() & 0xFF;
+  }
+
+  _getZeroXAddr() {
+    const value = this._readByte() & 0xFF;
+    this.memoryRead(value, 1);
+    return (value + this.X) & 0xFF;
+  }
+
+  _getZeroYAddr() {
+    const value = this._readByte() & 0xFF;
+    this.memoryRead(value, 1);
+    return (value + this.Y) & 0xFF;
+  }
+
+  _getAbsAddr() {
+    return this._readWord();
+  }
+
+  _getAbsXAddr(dummyRead = true) {
+    const baseAddr = this._readWord();
+    const pageCrossed = this._checkPageCrossedUnsigned(baseAddr, this.X);
+
+    if (pageCrossed || dummyRead) {
+      this.memoryRead((baseAddr + this.X - (pageCrossed ? 0x100 : 0)) & 0xFFFF, 1);
+    }
+
+    return (baseAddr + this.X) & 0xFFFF;
+  }
+
+  _getAbsYAddr(dummyRead = true) {
+    const baseAddr = this._readWord();
+    const pageCrossed = this._checkPageCrossedUnsigned(baseAddr, this.Y);
+
+    if (pageCrossed || dummyRead) {
+      this.memoryRead((baseAddr + this.Y - (pageCrossed ? 0x100 : 0)) & 0xFFFF, 1);
+    }
+
+    return (baseAddr + this.Y) & 0xFFFF;
+  }
+
+  _getInd() {
+    const addr = this.operand & 0xFFFF;
+
+    if ((addr & 0xFF) === 0xFF) {
+      const lo = this.memoryRead(addr & 0xFFFF) & 0xFF;
+      const hi = this.memoryRead((addr - 0xFF) & 0xFFFF) & 0xFF;
+      return ((hi << 8) | lo) & 0xFFFF;
+    }
+
+    return this._memoryReadWord(addr);
+  }
+
+  _getIndXAddr() {
+    let zp = this._readByte() & 0xFF;
+    this.memoryRead(zp, 1);
+
+    zp = (zp + this.X) & 0xFF;
+
+    if (zp === 0xFF) {
+      const lo = this.memoryRead(0x00FF) & 0xFF;
+      const hi = this.memoryRead(0x0000) & 0xFF;
+      return ((hi << 8) | lo) & 0xFFFF;
+    }
+
+    return this._memoryReadWord(zp);
+  }
+
+  _getIndYAddr(dummyRead = true) {
+    const zp = this._readByte() & 0xFF;
+
+    let addr;
+    if (zp === 0xFF) {
+      const lo = this.memoryRead(0x00FF) & 0xFF;
+      const hi = this.memoryRead(0x0000) & 0xFF;
+      addr = ((hi << 8) | lo) & 0xFFFF;
+    } else {
+      addr = this._memoryReadWord(zp);
+    }
+
+    const pageCrossed = this._checkPageCrossedUnsigned(addr, this.Y);
+    if (pageCrossed || dummyRead) {
+      this.memoryRead((addr + this.Y - (pageCrossed ? 0x100 : 0)) & 0xFFFF, 1);
+    }
+
+    return (addr + this.Y) & 0xFFFF;
+  }
+
+  _fetchOperand(mode) {
+    switch (mode) {
+      case AM.Acc:
+      case AM.Imp:
+        this._dummyRead();
+        return 0;
+
+      case AM.Imm:
+      case AM.Rel:
+        return this._getImmediate();
+
+      case AM.Zero:
+        return this._getZeroAddr();
+
+      case AM.ZeroX:
+        return this._getZeroXAddr();
+
+      case AM.ZeroY:
+        return this._getZeroYAddr();
+
+      case AM.Ind:
+        return this._getIndAddr();
+
+      case AM.IndX:
+        return this._getIndXAddr();
+
+      case AM.IndY:
+        return this._getIndYAddr(false);
+
+      case AM.IndYW:
+        return this._getIndYAddr(true);
+
+      case AM.Abs:
+        return this._getAbsAddr();
+
+      case AM.AbsX:
+        return this._getAbsXAddr(false);
+
+      case AM.AbsXW:
+        return this._getAbsXAddr(true);
+
+      case AM.AbsY:
+        return this._getAbsYAddr(false);
+
+      case AM.AbsYW:
+        return this._getAbsYAddr(true);
+
+      case AM.Other:
+      case AM.None:
+      default:
+        return 0;
+    }
+  }
+
+  // ===========================================================================
+  // ALU / COMMON INSTRUCTION HELPERS
+  // ===========================================================================
+
+  AND() {
+    this._setA(this.A & this._getOperandValue());
+  }
+
+  EOR() {
+    this._setA(this.A ^ this._getOperandValue());
+  }
+
+  ORA() {
+    this._setA(this.A | this._getOperandValue());
+  }
+
+  _ADD(value) {
+    const operand = value & 0xFF;
+    const result = this.A + operand + (this._checkFlag(FLAG_CARRY) ? 1 : 0);
+
+    this._clearFlags(FLAG_CARRY | FLAG_NEGATIVE | FLAG_OVERFLOW | FLAG_ZERO);
+    this._setZeroNegativeFlags(result & 0xFF);
+
+    if ((~(this.A ^ operand) & (this.A ^ result) & 0x80) !== 0) {
+      this._setFlags(FLAG_OVERFLOW);
+    }
+
+    if (result > 0xFF) {
+      this._setFlags(FLAG_CARRY);
+    }
+
+    this._setA(result & 0xFF);
+  }
+
+  ADC() {
+    this._ADD(this._getOperandValue());
+  }
+
+  SBC() {
+    this._ADD((this._getOperandValue() ^ 0xFF) & 0xFF);
+  }
+
+  _CMP(reg, value) {
+    const r = reg & 0xFF;
+    const v = value & 0xFF;
+
+    this._clearFlags(FLAG_CARRY | FLAG_NEGATIVE | FLAG_ZERO);
+
+    const result = (r - v) & 0x1FF;
+
+    if (r >= v) {
+      this._setFlags(FLAG_CARRY);
+    }
+
+    if (r === v) {
+      this._setFlags(FLAG_ZERO);
+    }
+
+    if ((result & 0x80) !== 0) {
+      this._setFlags(FLAG_NEGATIVE);
+    }
+  }
+
+  CPA() {
+    this._CMP(this.A, this._getOperandValue());
+  }
+
+  CPX() {
+    this._CMP(this.X, this._getOperandValue());
+  }
+
+  CPY() {
+    this._CMP(this.Y, this._getOperandValue());
+  }
+
+  INC() {
+    const addr = this.operand & 0xFFFF;
+    this._clearFlags(FLAG_NEGATIVE | FLAG_ZERO);
+
+    let value = this.memoryRead(addr) & 0xFF;
+    this.memoryWrite(addr, value, 2);
+
+    value = (value + 1) & 0xFF;
+    this._setZeroNegativeFlags(value);
+    this.memoryWrite(addr, value);
+  }
+
+  DEC() {
+    const addr = this.operand & 0xFFFF;
+    this._clearFlags(FLAG_NEGATIVE | FLAG_ZERO);
+
+    let value = this.memoryRead(addr) & 0xFF;
+    this.memoryWrite(addr, value, 2);
+
+    value = (value - 1) & 0xFF;
+    this._setZeroNegativeFlags(value);
+    this.memoryWrite(addr, value);
+  }
+
+  _ASL(value) {
+    const v = value & 0xFF;
+
+    this._clearFlags(FLAG_CARRY | FLAG_NEGATIVE | FLAG_ZERO);
+    if ((v & 0x80) !== 0) {
+      this._setFlags(FLAG_CARRY);
+    }
+
+    const result = (v << 1) & 0xFF;
+    this._setZeroNegativeFlags(result);
+    return result;
+  }
+
+  _LSR(value) {
+    const v = value & 0xFF;
+
+    this._clearFlags(FLAG_CARRY | FLAG_NEGATIVE | FLAG_ZERO);
+    if ((v & 0x01) !== 0) {
+      this._setFlags(FLAG_CARRY);
+    }
+
+    const result = (v >> 1) & 0xFF;
+    this._setZeroNegativeFlags(result);
+    return result;
+  }
+
+  _ROL(value) {
+    const v = value & 0xFF;
+    const carry = this._checkFlag(FLAG_CARRY);
+
+    this._clearFlags(FLAG_CARRY | FLAG_NEGATIVE | FLAG_ZERO);
+    if ((v & 0x80) !== 0) {
+      this._setFlags(FLAG_CARRY);
+    }
+
+    const result = ((v << 1) | (carry ? 1 : 0)) & 0xFF;
+    this._setZeroNegativeFlags(result);
+    return result;
+  }
+
+  _ROR(value) {
+    const v = value & 0xFF;
+    const carry = this._checkFlag(FLAG_CARRY);
+
+    this._clearFlags(FLAG_CARRY | FLAG_NEGATIVE | FLAG_ZERO);
+    if ((v & 0x01) !== 0) {
+      this._setFlags(FLAG_CARRY);
+    }
+
+    const result = ((v >> 1) | (carry ? 0x80 : 0x00)) & 0xFF;
+    this._setZeroNegativeFlags(result);
+    return result;
+  }
+
+  _ASLAddr() {
+    const addr = this.operand & 0xFFFF;
+    const value = this.memoryRead(addr) & 0xFF;
+    this.memoryWrite(addr, value, 2);
+    this.memoryWrite(addr, this._ASL(value));
+  }
+
+  _LSRAddr() {
+    const addr = this.operand & 0xFFFF;
+    const value = this.memoryRead(addr) & 0xFF;
+    this.memoryWrite(addr, value, 2);
+    this.memoryWrite(addr, this._LSR(value));
+  }
+
+  _ROLAddr() {
+    const addr = this.operand & 0xFFFF;
+    const value = this.memoryRead(addr) & 0xFF;
+    this.memoryWrite(addr, value, 2);
+    this.memoryWrite(addr, this._ROL(value));
+  }
+
+  _RORAddr() {
+    const addr = this.operand & 0xFFFF;
+    const value = this.memoryRead(addr) & 0xFF;
+    this.memoryWrite(addr, value, 2);
+    this.memoryWrite(addr, this._ROR(value));
+  }
+
+  _JMP(addr) {
+    this.PC = addr & 0xFFFF;
+  }
+
+  _branchRelative(shouldBranch) {
+    const offset = (this.operand << 24) >> 24;
+
+    if (shouldBranch) {
+      // Mesen quirk: branch can delay pending IRQ by one instruction.
+      if (this.runIrq && !this.prevRunIrq) {
+        this.runIrq = false;
+      }
+
+      this._dummyRead();
+
+      if (this._checkPageCrossedSigned(this.PC, offset)) {
+        this._dummyRead();
+      }
+
+      this.PC = (this.PC + offset) & 0xFFFF;
+    }
+  }
+
+  BIT() {
+    const value = this._getOperandValue();
+
+    this._clearFlags(FLAG_ZERO | FLAG_OVERFLOW | FLAG_NEGATIVE);
+    if ((this.A & value) === 0) {
+      this._setFlags(FLAG_ZERO);
+    }
+    if ((value & 0x40) !== 0) {
+      this._setFlags(FLAG_OVERFLOW);
+    }
+    if ((value & 0x80) !== 0) {
+      this._setFlags(FLAG_NEGATIVE);
+    }
+  }
+
+  // ===========================================================================
+  // OFFICIAL OPCODES
+  // ===========================================================================
+
+  LDA() { this._setA(this._getOperandValue()); }
+  LDX() { this._setX(this._getOperandValue()); }
+  LDY() { this._setY(this._getOperandValue()); }
+
+  STA() { this.memoryWrite(this.operand & 0xFFFF, this.A); }
+  STX() { this.memoryWrite(this.operand & 0xFFFF, this.X); }
+  STY() { this.memoryWrite(this.operand & 0xFFFF, this.Y); }
+
+  TAX() { this._setX(this.A); }
+  TAY() { this._setY(this.A); }
+  TSX() { this._setX(this.SP); }
+  TXA() { this._setA(this.X); }
+  TXS() { this.SP = this.X & 0xFF; }
+  TYA() { this._setA(this.Y); }
+
+  PHA() { this._push(this.A); }
+
+  PHP() {
+    this._push((this.P | FLAG_BREAK | FLAG_RESERVED) & 0xFF);
+  }
+
+  PLA() {
+    this._dummyRead();
+    this._setA(this._pop());
+  }
+
+  PLP() {
+    this._dummyRead();
+    this._setPS(this._pop());
+  }
+
+  INX() { this._setX((this.X + 1) & 0xFF); }
+  INY() { this._setY((this.Y + 1) & 0xFF); }
+
+  DEX() { this._setX((this.X - 1) & 0xFF); }
+  DEY() { this._setY((this.Y - 1) & 0xFF); }
+
+  ASL_Acc() { this._setA(this._ASL(this.A)); }
+  ASL_Memory() { this._ASLAddr(); }
+
+  LSR_Acc() { this._setA(this._LSR(this.A)); }
+  LSR_Memory() { this._LSRAddr(); }
+
+  ROL_Acc() { this._setA(this._ROL(this.A)); }
+  ROL_Memory() { this._ROLAddr(); }
+
+  ROR_Acc() { this._setA(this._ROR(this.A)); }
+  ROR_Memory() { this._RORAddr(); }
+
+  JMP_Abs() { this._JMP(this.operand & 0xFFFF); }
+  JMP_Ind() { this._JMP(this._getInd()); }
+
+  JSR() {
+    const lo = this._readByte();
+    this._dummyRead();
+    this._pushWord(this.PC);
+    const addr = ((this._readByte() << 8) | lo) & 0xFFFF;
+    this._JMP(addr);
+  }
+
+  RTS() {
+    this._dummyRead();
+    const addr = this._popWord();
+    this._dummyRead();
+    this.PC = (addr + 1) & 0xFFFF;
+  }
+
+  BCC() { this._branchRelative(!this._checkFlag(FLAG_CARRY)); }
+  BCS() { this._branchRelative(this._checkFlag(FLAG_CARRY)); }
+  BEQ() { this._branchRelative(this._checkFlag(FLAG_ZERO)); }
+  BMI() { this._branchRelative(this._checkFlag(FLAG_NEGATIVE)); }
+  BNE() { this._branchRelative(!this._checkFlag(FLAG_ZERO)); }
+  BPL() { this._branchRelative(!this._checkFlag(FLAG_NEGATIVE)); }
+  BVC() { this._branchRelative(!this._checkFlag(FLAG_OVERFLOW)); }
+  BVS() { this._branchRelative(this._checkFlag(FLAG_OVERFLOW)); }
+
+  CLC() { this._clearFlags(FLAG_CARRY); }
+  CLD() { this._clearFlags(FLAG_DECIMAL); }
+  CLI() { this._clearFlags(FLAG_INTERRUPT); }
+  CLV() { this._clearFlags(FLAG_OVERFLOW); }
+  SEC() { this._setFlags(FLAG_CARRY); }
+  SED() { this._setFlags(FLAG_DECIMAL); }
+  SEI() { this._setFlags(FLAG_INTERRUPT); }
+
+  BRK() {
+    this._pushWord((this.PC + 1) & 0xFFFF);
+
+    const flags = (this.P | FLAG_BREAK | FLAG_RESERVED) & 0xFF;
+
+    if (this.needNmi) {
+      this.needNmi = false;
+      this._push(flags);
+      this._setFlags(FLAG_INTERRUPT);
+      this.PC = this._memoryReadWord(NMI_VECTOR) & 0xFFFF;
+    } else {
+      this._push(flags);
+      this._setFlags(FLAG_INTERRUPT);
+      this.PC = this._memoryReadWord(IRQ_VECTOR) & 0xFFFF;
+    }
+
+    // Ensure interrupt handler runs at least one instruction before next NMI.
+    this.prevNeedNmi = false;
+  }
+
+  RTI() {
+    this._dummyRead();
+    this._setPS(this._pop());
+    this.PC = this._popWord() & 0xFFFF;
+  }
+
+  NOP() {
+    // Consume operand/read cycles for NOP variants.
+    this._getOperandValue();
+  }
+
+  // ===========================================================================
+  // UNOFFICIAL OPCODES (Mesen baseline)
+  // ===========================================================================
+
+  SLO() {
+    const value = this._getOperandValue();
+    this.memoryWrite(this.operand & 0xFFFF, value, 2);
+    const shifted = this._ASL(value);
+    this._setA(this.A | shifted);
+    this.memoryWrite(this.operand & 0xFFFF, shifted);
+  }
+
+  SRE() {
+    const value = this._getOperandValue();
+    this.memoryWrite(this.operand & 0xFFFF, value, 2);
+    const shifted = this._LSR(value);
+    this._setA(this.A ^ shifted);
+    this.memoryWrite(this.operand & 0xFFFF, shifted);
+  }
+
+  RLA() {
+    const value = this._getOperandValue();
+    this.memoryWrite(this.operand & 0xFFFF, value, 2);
+    const shifted = this._ROL(value);
+    this._setA(this.A & shifted);
+    this.memoryWrite(this.operand & 0xFFFF, shifted);
+  }
+
+  RRA() {
+    const value = this._getOperandValue();
+    this.memoryWrite(this.operand & 0xFFFF, value, 2);
+    const shifted = this._ROR(value);
+    this._ADD(shifted);
+    this.memoryWrite(this.operand & 0xFFFF, shifted);
+  }
+
+  SAX() {
+    this.memoryWrite(this.operand & 0xFFFF, this.A & this.X);
+  }
+
+  LAX() {
+    const value = this._getOperandValue();
+    this._setX(value);
+    this._setA(value);
+  }
+
+  DCP() {
+    let value = this._getOperandValue();
+    this.memoryWrite(this.operand & 0xFFFF, value, 2);
+    value = (value - 1) & 0xFF;
+    this._CMP(this.A, value);
+    this.memoryWrite(this.operand & 0xFFFF, value);
+  }
+
+  ISB() {
+    let value = this._getOperandValue();
+    this.memoryWrite(this.operand & 0xFFFF, value, 2);
+    value = (value + 1) & 0xFF;
+    this._ADD(value ^ 0xFF);
+    this.memoryWrite(this.operand & 0xFFFF, value);
+  }
+
+  AAC() {
+    this._setA(this.A & this._getOperandValue());
+
+    this._clearFlags(FLAG_CARRY);
+    if (this._checkFlag(FLAG_NEGATIVE)) {
+      this._setFlags(FLAG_CARRY);
+    }
+  }
+
+  ASR() {
+    this._clearFlags(FLAG_CARRY);
+    this._setA(this.A & this._getOperandValue());
+    if ((this.A & 0x01) !== 0) {
+      this._setFlags(FLAG_CARRY);
+    }
+    this._setA((this.A >> 1) & 0xFF);
+  }
+
+  ARR() {
+    this._setA((((this.A & this._getOperandValue()) >> 1) | (this._checkFlag(FLAG_CARRY) ? 0x80 : 0x00)) & 0xFF);
+    this._clearFlags(FLAG_CARRY | FLAG_OVERFLOW);
+
+    if ((this.A & 0x40) !== 0) {
+      this._setFlags(FLAG_CARRY);
+    }
+
+    if (((this._checkFlag(FLAG_CARRY) ? 1 : 0) ^ ((this.A >> 5) & 0x01)) !== 0) {
+      this._setFlags(FLAG_OVERFLOW);
+    }
+  }
+
+  ATX() {
+    const value = this._getOperandValue();
+    this._setA(value);
+    this._setX(this.A);
+    this._setA(this.A);
+  }
+
+  AXS() {
+    const opValue = this._getOperandValue();
+    const value = ((this.A & this.X) - opValue) & 0xFF;
+
+    this._clearFlags(FLAG_CARRY);
+    if ((this.A & this.X) >= opValue) {
+      this._setFlags(FLAG_CARRY);
+    }
+
+    this._setX(value);
+  }
+
+  _SyaSxaAxa(baseAddr, indexReg, valueReg) {
+    const base = baseAddr & 0xFFFF;
+    const index = indexReg & 0xFF;
+    const value = valueReg & 0xFF;
+
+    const pageCrossed = this._checkPageCrossedUnsigned(base, index);
+
+    const startCycle = this.cycleCount;
+    this.memoryRead((base + index - (pageCrossed ? 0x100 : 0)) & 0xFFFF, 1);
+    const hadDma = (this.cycleCount - startCycle) > 1;
+
+    const operand = (base + index) & 0xFFFF;
+
+    let addrHigh = (operand >> 8) & 0xFF;
+    const addrLow = operand & 0xFF;
+
+    if (pageCrossed) {
+      addrHigh &= value;
+    }
+
+    const writeValue = hadDma ? value : (value & (((base >> 8) + 1) & 0xFF));
+    this.memoryWrite(((addrHigh << 8) | addrLow) & 0xFFFF, writeValue & 0xFF);
+  }
+
+  SHY() {
+    this._SyaSxaAxa(this._readWord(), this.X, this.Y);
+  }
+
+  SHX() {
+    this._SyaSxaAxa(this._readWord(), this.Y, this.X);
+  }
+
+  SHAA() {
+    this._SyaSxaAxa(this._readWord(), this.Y, this.X & this.A);
+  }
+
+  SHAZ() {
+    const zp = this._readByte() & 0xFF;
+
+    let baseAddr;
+    if (zp === 0xFF) {
+      const lo = this.memoryRead(0x00FF) & 0xFF;
+      const hi = this.memoryRead(0x0000) & 0xFF;
+      baseAddr = ((hi << 8) | lo) & 0xFFFF;
+    } else {
+      baseAddr = this._memoryReadWord(zp);
+    }
+
+    this._SyaSxaAxa(baseAddr, this.Y, this.X & this.A);
+  }
+
+  TAS() {
+    this.SHAA();
+    this.SP = (this.X & this.A) & 0xFF;
+  }
+
+  HLT() {
+    // Freeze by re-executing current opcode forever.
+    this.PC = (this.PC - 1) & 0xFFFF;
+
+    // Block interrupt entry while halted.
+    this.prevRunIrq = false;
+    this.prevNeedNmi = false;
+  }
+
+  ANE() {
+    const imm = this._getOperandValue();
+    this._setA(((this.A | 0xEE) & this.X & imm) & 0xFF);
+  }
+
+  LAS() {
+    const value = this._getOperandValue();
+    this._setA(value & this.SP);
+    this._setX(this.A);
+    this.SP = this.A & 0xFF;
+  }
+
+  // ===========================================================================
+  // OPCODE TABLES
+  // ===========================================================================
+
+  _buildOpTable() {
+    const rows = [
+      ["BRK", "ORA", "HLT", "SLO", "NOP", "ORA", "ASL_Memory", "SLO", "PHP", "ORA", "ASL_Acc", "AAC", "NOP", "ORA", "ASL_Memory", "SLO"],
+      ["BPL", "ORA", "HLT", "SLO", "NOP", "ORA", "ASL_Memory", "SLO", "CLC", "ORA", "NOP", "SLO", "NOP", "ORA", "ASL_Memory", "SLO"],
+      ["JSR", "AND", "HLT", "RLA", "BIT", "AND", "ROL_Memory", "RLA", "PLP", "AND", "ROL_Acc", "AAC", "BIT", "AND", "ROL_Memory", "RLA"],
+      ["BMI", "AND", "HLT", "RLA", "NOP", "AND", "ROL_Memory", "RLA", "SEC", "AND", "NOP", "RLA", "NOP", "AND", "ROL_Memory", "RLA"],
+      ["RTI", "EOR", "HLT", "SRE", "NOP", "EOR", "LSR_Memory", "SRE", "PHA", "EOR", "LSR_Acc", "ASR", "JMP_Abs", "EOR", "LSR_Memory", "SRE"],
+      ["BVC", "EOR", "HLT", "SRE", "NOP", "EOR", "LSR_Memory", "SRE", "CLI", "EOR", "NOP", "SRE", "NOP", "EOR", "LSR_Memory", "SRE"],
+      ["RTS", "ADC", "HLT", "RRA", "NOP", "ADC", "ROR_Memory", "RRA", "PLA", "ADC", "ROR_Acc", "ARR", "JMP_Ind", "ADC", "ROR_Memory", "RRA"],
+      ["BVS", "ADC", "HLT", "RRA", "NOP", "ADC", "ROR_Memory", "RRA", "SEI", "ADC", "NOP", "RRA", "NOP", "ADC", "ROR_Memory", "RRA"],
+      ["NOP", "STA", "NOP", "SAX", "STY", "STA", "STX", "SAX", "DEY", "NOP", "TXA", "ANE", "STY", "STA", "STX", "SAX"],
+      ["BCC", "STA", "HLT", "SHAZ", "STY", "STA", "STX", "SAX", "TYA", "STA", "TXS", "TAS", "SHY", "STA", "SHX", "SHAA"],
+      ["LDY", "LDA", "LDX", "LAX", "LDY", "LDA", "LDX", "LAX", "TAY", "LDA", "TAX", "ATX", "LDY", "LDA", "LDX", "LAX"],
+      ["BCS", "LDA", "HLT", "LAX", "LDY", "LDA", "LDX", "LAX", "CLV", "LDA", "TSX", "LAS", "LDY", "LDA", "LDX", "LAX"],
+      ["CPY", "CPA", "NOP", "DCP", "CPY", "CPA", "DEC", "DCP", "INY", "CPA", "DEX", "AXS", "CPY", "CPA", "DEC", "DCP"],
+      ["BNE", "CPA", "HLT", "DCP", "NOP", "CPA", "DEC", "DCP", "CLD", "CPA", "NOP", "DCP", "NOP", "CPA", "DEC", "DCP"],
+      ["CPX", "SBC", "NOP", "ISB", "CPX", "SBC", "INC", "ISB", "INX", "SBC", "NOP", "SBC", "CPX", "SBC", "INC", "ISB"],
+      ["BEQ", "SBC", "HLT", "ISB", "NOP", "SBC", "INC", "ISB", "SED", "SBC", "NOP", "ISB", "NOP", "SBC", "INC", "ISB"],
+    ];
+
+    return rows.flat().map((name) => this[name]);
+  }
+
+  _buildAddrModeTable() {
+    const M = AM;
+    const rows = [
+      [M.Imp, M.IndX, M.None, M.IndX, M.Zero, M.Zero, M.Zero, M.Zero, M.Imp, M.Imm, M.Acc, M.Imm, M.Abs, M.Abs, M.Abs, M.Abs],
+      [M.Rel, M.IndY, M.None, M.IndYW, M.ZeroX, M.ZeroX, M.ZeroX, M.ZeroX, M.Imp, M.AbsY, M.Imp, M.AbsYW, M.AbsX, M.AbsX, M.AbsXW, M.AbsXW],
+      [M.Other, M.IndX, M.None, M.IndX, M.Zero, M.Zero, M.Zero, M.Zero, M.Imp, M.Imm, M.Acc, M.Imm, M.Abs, M.Abs, M.Abs, M.Abs],
+      [M.Rel, M.IndY, M.None, M.IndYW, M.ZeroX, M.ZeroX, M.ZeroX, M.ZeroX, M.Imp, M.AbsY, M.Imp, M.AbsYW, M.AbsX, M.AbsX, M.AbsXW, M.AbsXW],
+      [M.Imp, M.IndX, M.None, M.IndX, M.Zero, M.Zero, M.Zero, M.Zero, M.Imp, M.Imm, M.Acc, M.Imm, M.Abs, M.Abs, M.Abs, M.Abs],
+      [M.Rel, M.IndY, M.None, M.IndYW, M.ZeroX, M.ZeroX, M.ZeroX, M.ZeroX, M.Imp, M.AbsY, M.Imp, M.AbsYW, M.AbsX, M.AbsX, M.AbsXW, M.AbsXW],
+      [M.Imp, M.IndX, M.None, M.IndX, M.Zero, M.Zero, M.Zero, M.Zero, M.Imp, M.Imm, M.Acc, M.Imm, M.Ind, M.Abs, M.Abs, M.Abs],
+      [M.Rel, M.IndY, M.None, M.IndYW, M.ZeroX, M.ZeroX, M.ZeroX, M.ZeroX, M.Imp, M.AbsY, M.Imp, M.AbsYW, M.AbsX, M.AbsX, M.AbsXW, M.AbsXW],
+      [M.Imm, M.IndX, M.Imm, M.IndX, M.Zero, M.Zero, M.Zero, M.Zero, M.Imp, M.Imm, M.Imp, M.Imm, M.Abs, M.Abs, M.Abs, M.Abs],
+      [M.Rel, M.IndYW, M.None, M.Other, M.ZeroX, M.ZeroX, M.ZeroY, M.ZeroY, M.Imp, M.AbsYW, M.Imp, M.Other, M.Other, M.AbsXW, M.Other, M.Other],
+      [M.Imm, M.IndX, M.Imm, M.IndX, M.Zero, M.Zero, M.Zero, M.Zero, M.Imp, M.Imm, M.Imp, M.Imm, M.Abs, M.Abs, M.Abs, M.Abs],
+      [M.Rel, M.IndY, M.None, M.IndY, M.ZeroX, M.ZeroX, M.ZeroY, M.ZeroY, M.Imp, M.AbsY, M.Imp, M.AbsY, M.AbsX, M.AbsX, M.AbsY, M.AbsY],
+      [M.Imm, M.IndX, M.Imm, M.IndX, M.Zero, M.Zero, M.Zero, M.Zero, M.Imp, M.Imm, M.Imp, M.Imm, M.Abs, M.Abs, M.Abs, M.Abs],
+      [M.Rel, M.IndY, M.None, M.IndYW, M.ZeroX, M.ZeroX, M.ZeroX, M.ZeroX, M.Imp, M.AbsY, M.Imp, M.AbsYW, M.AbsX, M.AbsX, M.AbsXW, M.AbsXW],
+      [M.Imm, M.IndX, M.Imm, M.IndX, M.Zero, M.Zero, M.Zero, M.Zero, M.Imp, M.Imm, M.Imp, M.Imm, M.Abs, M.Abs, M.Abs, M.Abs],
+      [M.Rel, M.IndY, M.None, M.IndYW, M.ZeroX, M.ZeroX, M.ZeroX, M.ZeroX, M.Imp, M.AbsY, M.Imp, M.AbsYW, M.AbsX, M.AbsX, M.AbsXW, M.AbsXW],
+    ];
+
+    return rows.flat();
+  }
+
+  // ===========================================================================
+  // SAVE STATE
+  // ===========================================================================
 
   toJSON() {
-    const state = {};
-    for (let i = 0; i < CPU.JSON_PROPERTIES.length; i++) state[CPU.JSON_PROPERTIES[i]] = this[CPU.JSON_PROPERTIES[i]];
-    state.mem = Array.from(this.mem);
-    return state;
+    return {
+      stateVersion: 3,
+
+      ram: Array.from(this.ram),
+      mem: Array.from(this.mem),
+
+      A: this.A,
+      X: this.X,
+      Y: this.Y,
+      SP: this.SP,
+      P: this.P,
+      PC: this.PC,
+
+      dataBus: this.dataBus,
+
+      nmiFlag: this.nmiFlag,
+      irqFlag: this.irqFlag,
+      irqMask: this.irqMask,
+
+      prevRunIrq: this.prevRunIrq,
+      runIrq: this.runIrq,
+      prevNmiFlag: this.prevNmiFlag,
+      prevNeedNmi: this.prevNeedNmi,
+      needNmi: this.needNmi,
+
+      cycleCount: this.cycleCount,
+      cycleOffset: this.cycleOffset,
+      cyclesThisStep: this.cyclesThisStep,
+      cyclesToHalt: this.cyclesToHalt,
+
+      cpuWrite: this.cpuWrite,
+      instAddrMode: this.instAddrMode,
+      operand: this.operand,
+
+      startClockCount: this.startClockCount,
+      endClockCount: this.endClockCount,
+      ppuOffset: this.ppuOffset,
+    };
   }
 
   fromJSON(s) {
-    for (let i = 0; i < CPU.JSON_PROPERTIES.length; i++) this[CPU.JSON_PROPERTIES[i]] = s[CPU.JSON_PROPERTIES[i]];
-    this.mem = new Uint8Array(s.mem);
-  }
-}
-
-function buildOpData() {
-  const opdata = new Uint32Array(256);
-  const [ZP, REL, IMP, ABS, ACC, IMM, ZPX, ZPY, ABSX, ABSY, PRE, POST, IND] = 
-    [0,1,2,3,4,5,6,7,8,9,10,11,12];
-
-  const setOp = (op, inst, addr, size, cycles) => {
-    opdata[op] = (inst & 0xff) | ((addr & 0xff) << 8) | ((size & 0xff) << 16) | ((cycles & 0xff) << 24);
-  };
-  opdata.fill(0xff);
-
-  // ADC (0)
-  setOp(0x69, 0, IMM, 2, 2); setOp(0x65, 0, ZP, 2, 3); setOp(0x75, 0, ZPX, 2, 4); setOp(0x6d, 0, ABS, 3, 4);
-  setOp(0x7d, 0, ABSX, 3, 4); setOp(0x79, 0, ABSY, 3, 4); setOp(0x61, 0, PRE, 2, 6); setOp(0x71, 0, POST, 2, 5);
-  // AND (1)
-  setOp(0x29, 1, IMM, 2, 2); setOp(0x25, 1, ZP, 2, 3); setOp(0x35, 1, ZPX, 2, 4); setOp(0x2d, 1, ABS, 3, 4);
-  setOp(0x3d, 1, ABSX, 3, 4); setOp(0x39, 1, ABSY, 3, 4); setOp(0x21, 1, PRE, 2, 6); setOp(0x31, 1, POST, 2, 5);
-  // ASL (2)
-  setOp(0x0a, 2, ACC, 1, 2); setOp(0x06, 2, ZP, 2, 5); setOp(0x16, 2, ZPX, 2, 6); setOp(0x0e, 2, ABS, 3, 6); setOp(0x1e, 2, ABSX, 3, 7);
-  // BCC(3)/BCS(4)/BEQ(5)/BIT(6)/BMI(7)/BNE(8)/BPL(9)/BRK(10)
-  setOp(0x90, 3, REL, 2, 2); setOp(0xb0, 4, REL, 2, 2); setOp(0xf0, 5, REL, 2, 2); 
-  setOp(0x24, 6, ZP, 2, 3); setOp(0x2c, 6, ABS, 3, 4);
-  setOp(0x30, 7, REL, 2, 2); setOp(0xd0, 8, REL, 2, 2); setOp(0x10, 9, REL, 2, 2); 
-  setOp(0x00, 10, IMP, 1, 7);
-  // BVC(11)/BVS(12)/CLC(13)/CLD(14)/CLI(15)/CLV(16)
-  setOp(0x50, 11, REL, 2, 2); setOp(0x70, 12, REL, 2, 2);
-  setOp(0x18, 13, IMP, 1, 2); setOp(0xd8, 14, IMP, 1, 2); setOp(0x58, 15, IMP, 1, 2); setOp(0xb8, 16, IMP, 1, 2);
-  // CMP (17)
-  setOp(0xc9, 17, IMM, 2, 2); setOp(0xc5, 17, ZP, 2, 3); setOp(0xd5, 17, ZPX, 2, 4); setOp(0xcd, 17, ABS, 3, 4);
-  setOp(0xdd, 17, ABSX, 3, 4); setOp(0xd9, 17, ABSY, 3, 4); setOp(0xc1, 17, PRE, 2, 6); setOp(0xd1, 17, POST, 2, 5);
-  // CPX (18) / CPY (19)
-  setOp(0xe0, 18, IMM, 2, 2); setOp(0xe4, 18, ZP, 2, 3); setOp(0xec, 18, ABS, 3, 4);
-  setOp(0xc0, 19, IMM, 2, 2); setOp(0xc4, 19, ZP, 2, 3); setOp(0xcc, 19, ABS, 3, 4);
-  // DEC (20)
-  setOp(0xc6, 20, ZP, 2, 5); setOp(0xd6, 20, ZPX, 2, 6); setOp(0xce, 20, ABS, 3, 6); setOp(0xde, 20, ABSX, 3, 7);
-  // DEX(21) / DEY(22)
-  setOp(0xca, 21, IMP, 1, 2); setOp(0x88, 22, IMP, 1, 2); 
-  // EOR (23)
-  setOp(0x49, 23, IMM, 2, 2); setOp(0x45, 23, ZP, 2, 3); setOp(0x55, 23, ZPX, 2, 4); setOp(0x4d, 23, ABS, 3, 4);
-  setOp(0x5d, 23, ABSX, 3, 4); setOp(0x59, 23, ABSY, 3, 4); setOp(0x41, 23, PRE, 2, 6); setOp(0x51, 23, POST, 2, 5);
-  // INC (24)
-  setOp(0xe6, 24, ZP, 2, 5); setOp(0xf6, 24, ZPX, 2, 6); setOp(0xee, 24, ABS, 3, 6); setOp(0xfe, 24, ABSX, 3, 7);
-  // INX(25) / INY(26)
-  setOp(0xe8, 25, IMP, 1, 2); setOp(0xc8, 26, IMP, 1, 2); 
-  // JMP (27)
-  setOp(0x4c, 27, ABS, 3, 3); setOp(0x6c, 27, IND, 3, 5); 
-  // JSR (28)
-  setOp(0x20, 28, ABS, 3, 6);
-  // LDA (29)
-  setOp(0xa9, 29, IMM, 2, 2); setOp(0xa5, 29, ZP, 2, 3); setOp(0xb5, 29, ZPX, 2, 4); setOp(0xad, 29, ABS, 3, 4);
-  setOp(0xbd, 29, ABSX, 3, 4); setOp(0xb9, 29, ABSY, 3, 4); setOp(0xa1, 29, PRE, 2, 6); setOp(0xb1, 29, POST, 2, 5);
-  // LDX (30)
-  setOp(0xa2, 30, IMM, 2, 2); setOp(0xa6, 30, ZP, 2, 3); setOp(0xb6, 30, ZPY, 2, 4); setOp(0xae, 30, ABS, 3, 4); setOp(0xbe, 30, ABSY, 3, 4);
-  // LDY (31)
-  setOp(0xa0, 31, IMM, 2, 2); setOp(0xa4, 31, ZP, 2, 3); setOp(0xb4, 31, ZPX, 2, 4); setOp(0xac, 31, ABS, 3, 4); setOp(0xbc, 31, ABSX, 3, 4);
-  // LSR (32)
-  setOp(0x4a, 32, ACC, 1, 2); setOp(0x46, 32, ZP, 2, 5); setOp(0x56, 32, ZPX, 2, 6); setOp(0x4e, 32, ABS, 3, 6); setOp(0x5e, 32, ABSX, 3, 7);
-  // NOP (33)
-  [0x1a,0x3a,0x5a,0x7a,0xda,0xea,0xfa].forEach(op => setOp(op, 33, IMP, 1, 2));
-  // ORA (34)
-  setOp(0x09, 34, IMM, 2, 2); setOp(0x05, 34, ZP, 2, 3); setOp(0x15, 34, ZPX, 2, 4); setOp(0x0d, 34, ABS, 3, 4);
-  setOp(0x1d, 34, ABSX, 3, 4); setOp(0x19, 34, ABSY, 3, 4); setOp(0x01, 34, PRE, 2, 6); setOp(0x11, 34, POST, 2, 5);
-  // PHA(35)/PHP(36)/PLA(37)/PLP(38)
-  setOp(0x48, 35, IMP, 1, 3); setOp(0x08, 36, IMP, 1, 3); setOp(0x68, 37, IMP, 1, 4); setOp(0x28, 38, IMP, 1, 4);
-  // ROL (39)
-  setOp(0x2a, 39, ACC, 1, 2); setOp(0x26, 39, ZP, 2, 5); setOp(0x36, 39, ZPX, 2, 6); setOp(0x2e, 39, ABS, 3, 6); setOp(0x3e, 39, ABSX, 3, 7);
-  // ROR (40)
-  setOp(0x6a, 40, ACC, 1, 2); setOp(0x66, 40, ZP, 2, 5); setOp(0x76, 40, ZPX, 2, 6); setOp(0x6e, 40, ABS, 3, 6); setOp(0x7e, 40, ABSX, 3, 7);
-  // RTI(41)/RTS(42)
-  setOp(0x40, 41, IMP, 1, 6); setOp(0x60, 42, IMP, 1, 6);
-  // SBC (43)
-  setOp(0xe9, 43, IMM, 2, 2); setOp(0xe5, 43, ZP, 2, 3); setOp(0xf5, 43, ZPX, 2, 4); setOp(0xed, 43, ABS, 3, 4);
-  setOp(0xfd, 43, ABSX, 3, 4); setOp(0xf9, 43, ABSY, 3, 4); setOp(0xe1, 43, PRE, 2, 6); setOp(0xf1, 43, POST, 2, 5);
-  // SEC(44)/SED(45)/SEI(46)
-  setOp(0x38, 44, IMP, 1, 2); setOp(0xf8, 45, IMP, 1, 2); setOp(0x78, 46, IMP, 1, 2);
-  // STA (47)
-  setOp(0x85, 47, ZP, 2, 3); setOp(0x95, 47, ZPX, 2, 4); setOp(0x8d, 47, ABS, 3, 4); setOp(0x9d, 47, ABSX, 3, 5);
-  setOp(0x99, 47, ABSY, 3, 5); setOp(0x81, 47, PRE, 2, 6); setOp(0x91, 47, POST, 2, 6);
-  // STX (48) / STY (49)
-  setOp(0x86, 48, ZP, 2, 3); setOp(0x96, 48, ZPY, 2, 4); setOp(0x8e, 48, ABS, 3, 4);
-  setOp(0x84, 49, ZP, 2, 3); setOp(0x94, 49, ZPX, 2, 4); setOp(0x8c, 49, ABS, 3, 4);
-  // TAX(50)/TAY(51)/TSX(52)/TXA(53)/TXS(54)/TYA(55)
-  setOp(0xaa, 50, IMP, 1, 2); setOp(0xa8, 51, IMP, 1, 2); setOp(0xba, 52, IMP, 1, 2);
-  setOp(0x8a, 53, IMP, 1, 2); setOp(0x9a, 54, IMP, 1, 2); setOp(0x98, 55, IMP, 1, 2);
-  
-  // Illegal opcodes
-  [0x4b, 0x0b, 0x2b, 0x6b, 0xcb].forEach(op => setOp(op, 56, IMM, 2, 2));
-  setOp(0xa3, 57, PRE, 2, 6); setOp(0xa7, 57, ZP, 2, 3); setOp(0xaf, 57, ABS, 3, 4); setOp(0xb3, 57, POST, 2, 5); setOp(0xb7, 57, ZPY, 2, 4); setOp(0xbf, 57, ABSY, 3, 4);
-  setOp(0x83, 58, PRE, 2, 6); setOp(0x87, 58, ZP, 2, 3); setOp(0x8f, 58, ABS, 3, 4); setOp(0x97, 58, ZPY, 2, 4);
-  setOp(0xc3, 59, PRE, 2, 8); setOp(0xc7, 59, ZP, 2, 5); setOp(0xcf, 59, ABS, 3, 6); setOp(0xd3, 59, POST, 2, 8); setOp(0xd7, 59, ZPX, 2, 6); setOp(0xdb, 59, ABSY, 3, 7); setOp(0xdf, 59, ABSX, 3, 7);
-  setOp(0xe3, 60, PRE, 2, 8); setOp(0xe7, 60, ZP, 2, 5); setOp(0xef, 60, ABS, 3, 6); setOp(0xf3, 60, POST, 2, 8); setOp(0xf7, 60, ZPX, 2, 6); setOp(0xfb, 60, ABSY, 3, 7); setOp(0xff, 60, ABSX, 3, 7);
-  setOp(0x23, 61, PRE, 2, 8); setOp(0x27, 61, ZP, 2, 5); setOp(0x2f, 61, ABS, 3, 6); setOp(0x33, 61, POST, 2, 8); setOp(0x37, 61, ZPX, 2, 6); setOp(0x3b, 61, ABSY, 3, 7); setOp(0x3f, 61, ABSX, 3, 7);
-  setOp(0x63, 62, PRE, 2, 8); setOp(0x67, 62, ZP, 2, 5); setOp(0x6f, 62, ABS, 3, 6); setOp(0x73, 62, POST, 2, 8); setOp(0x77, 62, ZPX, 2, 6); setOp(0x7b, 62, ABSY, 3, 7); setOp(0x7f, 62, ABSX, 3, 7);
-  setOp(0x03, 63, PRE, 2, 8); setOp(0x07, 63, ZP, 2, 5); setOp(0x0f, 63, ABS, 3, 6); setOp(0x13, 63, POST, 2, 8); setOp(0x17, 63, ZPX, 2, 6); setOp(0x1b, 63, ABSY, 3, 7); setOp(0x1f, 63, ABSX, 3, 7);
-  setOp(0x43, 64, PRE, 2, 8); setOp(0x47, 64, ZP, 2, 5); setOp(0x4f, 64, ABS, 3, 6); setOp(0x53, 64, POST, 2, 8); setOp(0x57, 64, ZPX, 2, 6); setOp(0x5b, 64, ABSY, 3, 7); setOp(0x5f, 64, ABSX, 3, 7);
-  [0x80, 0x82, 0x89, 0xc2, 0xe2].forEach(op => setOp(op, 68, IMM, 2, 2));
-  [0x0c, 0x1c, 0x3c, 0x5c, 0x7c, 0xdc, 0xfc].forEach(op => setOp(op, 69, ABSX, 3, 4));
-  [0x04, 0x44, 0x64].forEach(op => setOp(op, 69, ZP, 2, 3));
-  [0x14, 0x34, 0x54, 0x74, 0xd4, 0xf4].forEach(op => setOp(op, 69, ZPX, 2, 4));
-
-  // Default any undefined/illegal opcode to NOP (size 1, 2 cycles) to keep PC in sync
-  for (let op = 0; op < 256; op++) {
-    if (opdata[op] === 0xff) {
-      setOp(op, 33, IMP, 1, 2); // NOP implied
+    if (!s || s.stateVersion !== 3) {
+      throw new Error(`CPU save state version not supported (got v${s?.stateVersion}, expected v3)`);
     }
+
+    this.ram = new Uint8Array(s.ram || this.ram);
+
+    if (s.mem) {
+      this.mem = new Uint8Array(s.mem);
+    } else {
+      this.mem = new Uint8Array(0x10000);
+      for (let i = 0; i < 0x0800; i++) {
+        this.mem[i] = this.ram[i];
+      }
+    }
+
+    this.A = (s.A ?? this.A) & 0xFF;
+    this.X = (s.X ?? this.X) & 0xFF;
+    this.Y = (s.Y ?? this.Y) & 0xFF;
+    this.SP = (s.SP ?? this.SP) & 0xFF;
+    this.PC = (s.PC ?? this.PC) & 0xFFFF;
+    this._setPS((s.P ?? this.P) & 0xFF);
+
+    this.dataBus = (s.dataBus ?? this.dataBus) & 0xFF;
+
+    this.nmiFlag = !!(s.nmiFlag ?? this.nmiFlag);
+    this.irqFlag = (s.irqFlag ?? this.irqFlag) & 0xFF;
+    this.irqMask = (s.irqMask ?? this.irqMask) & 0xFF;
+
+    this.prevRunIrq = !!(s.prevRunIrq ?? this.prevRunIrq);
+    this.runIrq = !!(s.runIrq ?? this.runIrq);
+    this.prevNmiFlag = !!(s.prevNmiFlag ?? this.prevNmiFlag);
+    this.prevNeedNmi = !!(s.prevNeedNmi ?? this.prevNeedNmi);
+    this.needNmi = !!(s.needNmi ?? this.needNmi);
+
+    this.cycleCount = s.cycleCount ?? this.cycleCount;
+    this.cycleOffset = s.cycleOffset ?? 0;
+    this.cyclesThisStep = s.cyclesThisStep ?? 0;
+    this.cyclesToHalt = s.cyclesToHalt ?? 0;
+
+    this.cpuWrite = !!(s.cpuWrite ?? false);
+    this.instAddrMode = s.instAddrMode ?? AM.None;
+    this.operand = s.operand ?? 0;
+
+    this.startClockCount = s.startClockCount ?? this.startClockCount;
+    this.endClockCount = s.endClockCount ?? this.endClockCount;
+    this.ppuOffset = s.ppuOffset ?? this.ppuOffset;
+
+    this._setMasterClockDivider(this._resolveRegion());
   }
-  return opdata;
 }

@@ -1,287 +1,352 @@
-// Mapper 025: VRC4b VRC4d
-// Used by: Gradius II
-//
-// Features:
-//   - 8-bit CHR bank registers (up to 256KB CHR)
-//   - Fixed last/second-last PRG banks with swap mode
-//   - Horizontal, vertical and 1-screen mirroring.
-//   - IRQ device
-//
-// References:
-//   - https://www.nesdev.org/wiki/VRC2_and_VRC4
+import BaseMapper from "./mapper-base.js";
 
-import Mapper from './mapper-base.js';
+const VARIANT_VRC2C = 0;
+const VARIANT_VRC4B = 1;
+const VARIANT_VRC4D = 2;
 
-export default class Mapper025 extends Mapper {
-  constructor(cartridge) {
-    super(cartridge);
-    this.nes = cartridge.nes; // Ensure NES reference is available
+// Mapper 025 (Konami VRC2c / VRC4b / VRC4d)
+// Mesen reference baseline from mesen-vrc2_4.h, narrowed to mapper 25 variants.
+export default class Mapper025 extends BaseMapper {
+  getPrgPageSize() {
+    return 0x2000;
+  }
 
-    // VRC4 State
-    this.prgRegs = [0, 0]; // Registers for $8000, $A000
-    this.chrRegs = new Int32Array(8); // 8-bit CHR registers
-    this.mirroringReg = 0; // $9000
-    this.programMode = 0;  // $9002 (Bit 1)
-    
-    // IRQ State
-    this.irqLatch = 0;
-    this.irqCounter = 0;
-    this.irqEnabled = false;
-    this.irqEnabledAfterAck = false;
-    this.irqMode = 0; // 0=Scanline, 1=Cycle
-    this.prescaler = 0;
+  getChrPageSize() {
+    return 0x0400;
+  }
 
-    // Variant Detection (VRC4b vs VRC4d)
-    // VRC4b: A0, A1 (Normal)
-    // VRC4d: A1, A0 (Swapped)
-    this.variant = 'VRC4b';
-    this.pinA0 = 1;
-    this.pinA1 = 2;
+  allowRegisterRead() {
+    return true;
+  }
 
-    if (!this.chrData || this.chrData.length === 0) {
-      this.useVRAM(8);
+  enableCpuClockHook() {
+    return true;
+  }
+
+  _getPowerOnByte(defaultValue = 0) {
+    // This codebase does not currently expose RandomizeMapperPowerOnState.
+    return defaultValue & 0xFF;
+  }
+
+  _isVrc4Variant() {
+    return this._variant === VARIANT_VRC4B || this._variant === VARIANT_VRC4D;
+  }
+
+  _detectVariant() {
+    const mapperId = (this.cartridge && (this.cartridge.mapperType | 0)) || 0;
+    const submapper = (this.cartridge && (this.cartridge.submapper | 0)) || 0;
+
+    // Mapper 25 conflicts in Mesen: VRC2c, VRC4b, VRC4d
+    switch (submapper) {
+      case 2:
+        this._variant = VARIANT_VRC4D;
+        break;
+      case 3:
+        this._variant = VARIANT_VRC2C;
+        break;
+      case 1:
+      case 0:
+      default:
+        this._variant = VARIANT_VRC4B;
+        break;
     }
-    
-    const crc = this.cartridge.getCRC32 ? this.cartridge.getCRC32().toString(16).toUpperCase() : '';
-    
-    // Known VRC4d Games (Gradius II, etc.)
-    const vrc4dGames = [
-      '13886346', // Gradius II (J)
-      '5ADBF660', // Gradius II (J)
-      'A2060609', // Racer Mini Yonku (J)
-    ];
 
-    if (vrc4dGames.includes(crc)) {
-      this.variant = 'VRC4d';
-      this.pinA0 = 2;
-      this.pinA1 = 1;
-      console.log('Mapper 25: Detected VRC4d variant');
+    this._useHeuristics = mapperId === 25 && submapper === 0;
+  }
+
+  _updateState() {
+    for (let i = 0; i < 8; i++) {
+      const page = (this._loChrRegs[i] | (this._hiChrRegs[i] << 4)) & 0x1FF;
+      this.SelectChrPage(i, page);
+    }
+
+    if (this._prgMode === 0) {
+      this.SelectPrgPage(0, this._prgReg0);
+      this.SelectPrgPage(1, this._prgReg1);
+      this.SelectPrgPage(2, -2);
+      this.SelectPrgPage(3, -1);
     } else {
-      console.log('Mapper 25: Defaulting to VRC4b variant');
+      this.SelectPrgPage(0, -2);
+      this.SelectPrgPage(1, this._prgReg1);
+      this.SelectPrgPage(2, this._prgReg0);
+      this.SelectPrgPage(3, -1);
     }
   }
 
-  reset() {
-    super.reset();
-    // Default Banks
-    this.prgRegs[0] = 0;
-    this.prgRegs[1] = 0;
-    this.programMode = 0;
-    this.updatePrgBanks();
-    
-    // CHR defaults
-    for (let i = 0; i < 8; i++) this.chrRegs[i] = 0;
-    this.updateChrBanks();
+  _translateAddress(addr) {
+    const address = addr & 0xFFFF;
+    let a0 = 0;
+    let a1 = 0;
 
-    this.mirroringReg = 0;
-    this.updateMirroring();
-    
-    this.irqEnabled = false;
-    this.irqCounter = 0;
-    this.prescaler = 0;
+    if (this._useHeuristics) {
+      // Mapper 25 heuristic mode: OR VRC4b and VRC4d line mappings.
+      a0 = (address >> 1) & 0x01;
+      a1 = address & 0x01;
 
-    if (this.nes && this.nes.rom && this.nes.rom.batteryRam && this.nes.rom.batteryRam.length) {
-      const len = Math.min(this.nes.rom.batteryRam.length, this.prgRam.length);
-      this.prgRam.set(this.nes.rom.batteryRam.subarray(0, len));
+      a0 |= (address >> 3) & 0x01;
+      a1 |= (address >> 2) & 0x01;
+    } else if (this._variant === VARIANT_VRC4D) {
+      a0 = (address >> 3) & 0x01;
+      a1 = (address >> 2) & 0x01;
+    } else {
+      // VRC2c / VRC4b
+      a0 = (address >> 1) & 0x01;
+      a1 = address & 0x01;
+    }
+
+    return ((address & 0xFF00) | (a1 << 1) | a0) & 0xFFFF;
+  }
+
+  _getExternalIrqId() {
+    if (this.nes && this.nes.cpu && typeof this.nes.cpu.IRQ_EXTERNAL === "number") {
+      return this.nes.cpu.IRQ_EXTERNAL;
+    }
+    return 8;
+  }
+
+  _clearExternalIrq() {
+    if (this.nes && this.nes.cpu && typeof this.nes.cpu.clearIrq === "function") {
+      this.nes.cpu.clearIrq(this._getExternalIrqId());
     }
   }
 
-  /**
-   * Helper to map CPU address to the VRC4 register address.
-   */
-  getRegisterAddress(address) {
-    const a0 = (address & this.pinA0) ? 1 : 0;
-    const a1 = (address & this.pinA1) ? 1 : 0;
-    return (address & 0xF000) | (a0 << 0) | (a1 << 1);
+  _triggerIrq() {
+    if (this.nes && this.nes.cpu && typeof this.nes.cpu.requestIrq === "function") {
+      this.nes.cpu.requestIrq(this._getExternalIrqId());
+    }
   }
 
-  cpuRead(address) {
-    if (address >= 0x6000 && address < 0x8000) {
-      return this.prgRam[address - 0x6000];
+  _irqSetReloadValueNibble(value, highNibble) {
+    if (highNibble) {
+      this._irqReloadValue = ((this._irqReloadValue & 0x0F) | ((value & 0x0F) << 4)) & 0xFF;
+    } else {
+      this._irqReloadValue = ((this._irqReloadValue & 0xF0) | (value & 0x0F)) & 0xFF;
     }
-
-    if (address >= 0x8000) {
-      if (!this.prgData || this.prgBankCount === 0) return 0;
-      const slot = (address >> 13) & 0x03;
-      const offset = address & 0x1FFF;
-      return this.prgData[this.prgPagesMap[slot] + offset];
-    }
-    return undefined;
   }
 
-  cpuWrite(address, value) {
-    if (address < 0x6000) {
+  _irqSetControlValue(value) {
+    this._irqEnabledAfterAck = (value & 0x01) !== 0;
+    this._irqEnabled = (value & 0x02) !== 0;
+    this._irqCycleMode = (value & 0x04) !== 0;
+    this._clearExternalIrq();
+
+    if (this._irqEnabled) {
+      this._irqCounter = this._irqReloadValue & 0xFF;
+      this._irqPrescaler = 341;
+    }
+  }
+
+  _irqAcknowledge() {
+    this._clearExternalIrq();
+    this._irqEnabled = this._irqEnabledAfterAck;
+  }
+
+  _irqClockCounter() {
+    if (this._irqCounter === 0xFF) {
+      this._irqCounter = this._irqReloadValue & 0xFF;
+      this._triggerIrq();
+    } else {
+      this._irqCounter = (this._irqCounter + 1) & 0xFF;
+    }
+  }
+
+  _irqProcessCpuClock() {
+    if (!this._irqEnabled) {
       return;
     }
+
+    if (this._irqCycleMode) {
+      this._irqClockCounter();
+      return;
+    }
+
+    this._irqPrescaler -= 3;
+    while (this._irqPrescaler <= 0) {
+      this._irqPrescaler += 341;
+      this._irqClockCounter();
+    }
+  }
+
+  _initVrcState() {
+    this._detectVariant();
+
+    this._prgMode = this._isVrc4Variant() ? (this._getPowerOnByte() & 0x01) : 0;
+    this._prgReg0 = this._getPowerOnByte() & 0x1F;
+    this._prgReg1 = this._getPowerOnByte() & 0x1F;
+    this._latch = 0;
+
+    this._loChrRegs = new Uint8Array(8);
+    this._hiChrRegs = new Uint8Array(8);
+    for (let i = 0; i < 8; i++) {
+      this._loChrRegs[i] = this._getPowerOnByte() & 0x0F;
+      this._hiChrRegs[i] = this._getPowerOnByte() & 0x1F;
+    }
+
+    this._irqReloadValue = 0;
+    this._irqCounter = 0;
+    this._irqPrescaler = 341;
+    this._irqEnabled = false;
+    this._irqEnabledAfterAck = false;
+    this._irqCycleMode = false;
+
+    this._updateState();
+    this._clearExternalIrq();
+
+    // Mesen removes all read-register ranges and only exposes the VRC2
+    // microwire interface at $6000-$7FFF when no PRG RAM is present.
+    this.RemoveRegisterRange(0x0000, 0xFFFF, this.MemoryOperation.Read);
+    if (!this._useHeuristics && this._variant === VARIANT_VRC2C && this._workRamSize === 0 && this._saveRamSize === 0) {
+      this.AddRegisterRange(0x6000, 0x7FFF, this.MemoryOperation.Any);
+    }
+  }
+
+  initMapper() {
+    this._initVrcState();
+  }
+
+  reset(softReset = false) {
+    super.reset(softReset);
+    this._initVrcState();
+  }
+
+  processCpuClock() {
+    if (this._useHeuristics || this._isVrc4Variant()) {
+      this._irqProcessCpuClock();
+    }
+  }
+
+  readRegister(addr) {
+    return (this._latch & 0x01) | (this._openBus(addr) & 0xFE);
+  }
+
+  writeRegister(addr, value) {
+    const address = addr & 0xFFFF;
+    const writeValue = value & 0xFF;
 
     if (address < 0x8000) {
-      this.prgRam[address - 0x6000] = value;
+      // Microwire interface ($6000-$6FFF) for VRC2 variants.
+      this._latch = writeValue & 0x01;
       return;
     }
 
-    const regAddress = this.getRegisterAddress(address);
-    const regIndex = regAddress & 0x0003;
+    const translated = this._translateAddress(address) & 0xF00F;
+    const isVrc2 = this._variant === VARIANT_VRC2C;
+    const isVrc4 = this._isVrc4Variant();
 
-    switch (regAddress) {
-      case 0x8000:
-      case 0x8001:
-      case 0x8002:
-      case 0x8003:
-        this.prgRegs[0] = value & 0x1F;
-        this.updatePrgBanks();
-        break;
+    if (translated >= 0x8000 && translated <= 0x8006) {
+      this._prgReg0 = writeValue & 0x1F;
+    } else if (
+      (isVrc2 && translated >= 0x9000 && translated <= 0x9003) ||
+      (isVrc4 && translated >= 0x9000 && translated <= 0x9001)
+    ) {
+      let mask = 0x03;
+      if (!this._useHeuristics && isVrc2) {
+        // Known VRC2 boards use only bit 0 for mirroring select.
+        mask = 0x01;
+      }
 
-      case 0x9000:
-      case 0x9001:
-        this.mirroringReg = value & 0x03;
-        this.updateMirroring();
-        break;
+      switch (writeValue & mask) {
+        case 0:
+          this.SetMirroringType(this.MIRROR_VERTICAL);
+          break;
+        case 1:
+          this.SetMirroringType(this.MIRROR_HORIZONTAL);
+          break;
+        case 2:
+          this.SetMirroringType(this.MIRROR_SINGLE_A);
+          break;
+        case 3:
+          this.SetMirroringType(this.MIRROR_SINGLE_B);
+          break;
+      }
+    } else if (isVrc4 && translated >= 0x9002 && translated <= 0x9003) {
+      this._prgMode = (writeValue >> 1) & 0x01;
+    } else if (translated >= 0xA000 && translated <= 0xA006) {
+      this._prgReg1 = writeValue & 0x1F;
+    } else if (translated >= 0xB000 && translated <= 0xE006) {
+      const regNumber = ((((translated >> 12) & 0x07) - 3) << 1) + ((translated >> 1) & 0x01);
+      const lowBits = (translated & 0x01) === 0;
 
-      case 0x9002:
-      case 0x9003:
-        this.programMode = (value & 0x02) ? 1 : 0;
-        this.updatePrgBanks();
-        break;
-
-      case 0xA000:
-      case 0xA001:
-      case 0xA002:
-      case 0xA003:
-        this.prgRegs[1] = value & 0x1F;
-        this.updatePrgBanks();
-        break;
-
-      case 0xB000:
-      case 0xB001:
-      case 0xB002:
-      case 0xB003:
-        this.writeChrReg(0, regIndex, value);
-        break;
-
-      case 0xC000:
-      case 0xC001:
-      case 0xC002:
-      case 0xC003:
-        this.writeChrReg(2, regIndex, value);
-        break;
-
-      case 0xD000:
-      case 0xD001:
-      case 0xD002:
-      case 0xD003:
-        this.writeChrReg(4, regIndex, value);
-        break;
-
-      case 0xE000:
-      case 0xE001:
-      case 0xE002:
-      case 0xE003:
-        this.writeChrReg(6, regIndex, value);
-        break;
-
-      case 0xF000:
-        this.irqLatch = (this.irqLatch & 0xF0) | (value & 0x0F);
-        break;
-      case 0xF001:
-        this.irqLatch = (this.irqLatch & 0x0F) | ((value & 0x0F) << 4);
-        break;
-      case 0xF002:
-        this.irqEnabledAfterAck = (value & 0x01) !== 0;
-        this.irqEnabled = (value & 0x02) !== 0;
-        this.irqMode = (value & 0x04) !== 0 ? 1 : 0; // 1=Cycle, 0=Scanline
-        if (this.irqEnabled) {
-          this.irqCounter = this.irqLatch;
-          this.prescaler = 341;
-        }
-        if (this.nes.cpu.clearIrq) this.nes.cpu.clearIrq(this.nes.cpu.IRQ_NORMAL);
-        break;
-      case 0xF003:
-        this.irqEnabled = this.irqEnabledAfterAck;
-        if (this.nes.cpu.clearIrq) this.nes.cpu.clearIrq(this.nes.cpu.IRQ_NORMAL);
-        break;
+      if (lowBits) {
+        this._loChrRegs[regNumber] = writeValue & 0x0F;
+      } else {
+        this._hiChrRegs[regNumber] = writeValue & 0x1F;
+      }
+    } else if (translated === 0xF000) {
+      this._irqSetReloadValueNibble(writeValue, false);
+    } else if (translated === 0xF001) {
+      this._irqSetReloadValueNibble(writeValue, true);
+    } else if (translated === 0xF002) {
+      this._irqSetControlValue(writeValue);
+    } else if (translated === 0xF003) {
+      this._irqAcknowledge();
     }
+
+    this._updateState();
   }
 
-  writeChrReg(baseChrIndex, regIndex, value) {
-      // VRC4 Register Layout:
-      // Bit 0 of regIndex selects High/Low nibble (0=Low, 1=High)
-      // Bit 1 of regIndex selects Even/Odd bank (0=Even, 1=Odd)
-      const isHigh = (regIndex & 0x01) !== 0;
-      const chrSlot = baseChrIndex + ((regIndex >> 1) & 0x01);
-      
-      if (isHigh) {
-          this.chrRegs[chrSlot] = (this.chrRegs[chrSlot] & 0x0F) | ((value & 0x0F) << 4);
-      } else {
-          this.chrRegs[chrSlot] = (this.chrRegs[chrSlot] & 0xF0) | (value & 0x0F);
-      }
-      this.updateChrBanks();
+  toJSON() {
+    return {
+      ...super.toJSON(),
+      mapper025: {
+        variant: this._variant | 0,
+        useHeuristics: !!this._useHeuristics,
+        prgReg0: this._prgReg0 | 0,
+        prgReg1: this._prgReg1 | 0,
+        prgMode: this._prgMode | 0,
+        latch: this._latch | 0,
+        loChrRegs: Array.from(this._loChrRegs || []),
+        hiChrRegs: Array.from(this._hiChrRegs || []),
+        irqReloadValue: this._irqReloadValue | 0,
+        irqCounter: this._irqCounter | 0,
+        irqPrescaler: this._irqPrescaler | 0,
+        irqEnabled: !!this._irqEnabled,
+        irqEnabledAfterAck: !!this._irqEnabledAfterAck,
+        irqCycleMode: !!this._irqCycleMode,
+      },
+    };
   }
 
-  updatePrgBanks() {
-      let b8, bA, bC, bE;
-      const count = this.prgBankCount || 16;
-      const lastBank = count - 1;
-      const secondLast = count - 2;
-      
-      if (this.programMode === 0) {
-          b8 = this.prgRegs[0];
-          bC = secondLast;
-      } else {
-          b8 = secondLast;
-          bC = this.prgRegs[0];
-      }
-      bA = this.prgRegs[1];
-      bE = lastBank;
-      
-      this.switch8kPrgBank(b8, 0); // $8000
-      this.switch8kPrgBank(bA, 1); // $A000
-      this.switch8kPrgBank(bC, 2); // $C000
-      this.switch8kPrgBank(bE, 3); // $E000
-  }
+  fromJSON(state) {
+    super.fromJSON(state);
 
-  updateChrBanks() {
-      for (let i = 0; i < 8; i++) {
-          this.switch1kChrBank(this.chrRegs[i], i);
-      }
-  }
+    const s = state && state.mapper025;
+    if (!s) {
+      this._initVrcState();
+      return;
+    }
 
-  updateMirroring() {
-      if (!this.nes || !this.nes.ppu) return;
-      switch (this.mirroringReg & 0x03) {
-          case 0: this.nes.ppu.setMirroring(this.nes.rom.VERTICAL_MIRRORING); break;
-          case 1: this.nes.ppu.setMirroring(this.nes.rom.HORIZONTAL_MIRRORING); break;
-          case 2: this.nes.ppu.setMirroring(this.nes.rom.SINGLESCREEN_MIRRORING_A); break;
-          case 3: this.nes.ppu.setMirroring(this.nes.rom.SINGLESCREEN_MIRRORING_B); break;
-      }
-  }
+    this._variant = (s.variant ?? this._variant ?? VARIANT_VRC4B) | 0;
+    this._useHeuristics = !!(s.useHeuristics ?? this._useHeuristics);
+    this._prgReg0 = (s.prgReg0 ?? this._prgReg0 ?? 0) & 0x1F;
+    this._prgReg1 = (s.prgReg1 ?? this._prgReg1 ?? 0) & 0x1F;
+    this._prgMode = (s.prgMode ?? this._prgMode ?? 0) & 0x01;
+    this._latch = (s.latch ?? this._latch ?? 0) & 0x01;
 
-  cpuClock(cpuCycles) {
-      if (!this.irqEnabled) return;
+    const lo = Array.isArray(s.loChrRegs) ? s.loChrRegs : [];
+    const hi = Array.isArray(s.hiChrRegs) ? s.hiChrRegs : [];
+    this._loChrRegs = new Uint8Array(8);
+    this._hiChrRegs = new Uint8Array(8);
+    for (let i = 0; i < 8; i++) {
+      this._loChrRegs[i] = (lo[i] ?? 0) & 0x0F;
+      this._hiChrRegs[i] = (hi[i] ?? 0) & 0x1F;
+    }
 
-      if (this.irqMode === 0) {
-          // Scanline mode: 341 PPU cycles, advance by CPU cycles * 3
-          const ppuCycles = cpuCycles * 3;
-          this.prescaler -= ppuCycles;
-          while (this.prescaler <= 0) {
-              this.prescaler += 341;
-              if (this.irqCounter === 0xFF) {
-                  this.irqCounter = this.irqLatch;
-                  if (this.nes.cpu.requestIrq) this.nes.cpu.requestIrq(this.nes.cpu.IRQ_NORMAL);
-              } else {
-                  this.irqCounter++;
-              }
-          }
-          return;
-      }
+    this._irqReloadValue = (s.irqReloadValue ?? this._irqReloadValue ?? 0) & 0xFF;
+    this._irqCounter = (s.irqCounter ?? this._irqCounter ?? 0) & 0xFF;
+    this._irqPrescaler = (s.irqPrescaler ?? this._irqPrescaler ?? 341) | 0;
+    this._irqEnabled = !!(s.irqEnabled ?? this._irqEnabled);
+    this._irqEnabledAfterAck = !!(s.irqEnabledAfterAck ?? this._irqEnabledAfterAck);
+    this._irqCycleMode = !!(s.irqCycleMode ?? this._irqCycleMode);
 
-      // Cycle mode: advance per CPU cycle
-      for (let i = 0; i < cpuCycles; i++) {
-          if (this.irqCounter === 0xFF) {
-              this.irqCounter = this.irqLatch;
-              if (this.nes.cpu.requestIrq) this.nes.cpu.requestIrq(this.nes.cpu.IRQ_NORMAL);
-          } else {
-              this.irqCounter++;
-          }
-      }
+    this.RemoveRegisterRange(0x0000, 0xFFFF, this.MemoryOperation.Read);
+    if (!this._useHeuristics && this._variant === VARIANT_VRC2C && this._workRamSize === 0 && this._saveRamSize === 0) {
+      this.AddRegisterRange(0x6000, 0x7FFF, this.MemoryOperation.Any);
+    }
+
+    this._updateState();
+    if (!this._irqEnabled) {
+      this._clearExternalIrq();
+    }
   }
 }

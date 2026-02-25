@@ -1,105 +1,148 @@
-// Mapper 034: BNROM / NINA-001
-// Used by: Deadly Towers, Impossible Mission II
-//
-// Features:
-//   - 32KB PRG bank switching
-//   - (NINA-001 only) 2x 4KB CHR bank switching
-//
-// References:
-//   - https://wiki.nesdev.com/w/index.php/BNROM
-//   - https://wiki.nesdev.com/w/index.php/NINA-001
+import BaseMapper from "./mapper-base.js";
 
-import Mapper from './mapper-base.js';
+// Mapper 034 (BNROM / NINA-001, merged)
+// Mesen references:
+// - BNROM: mesen-bnrom.h
+// - NINA-001: mesen-nina001.h
+export default class Mapper034 extends BaseMapper {
+  getPrgPageSize() {
+    return 0x8000;
+  }
 
-export default class Mapper034 extends Mapper {
-    constructor(cartridge) {
-        super(cartridge);
-        
-        // Mapper 34 covers two distinct boards:
-        // 1. BNROM (Deadly Towers): PRG banking only, CHR-RAM.
-        // 2. NINA-001 (Impossible Mission II): PRG + CHR banking, CHR-ROM.
-        // Heuristic: If CHR-ROM is present, it's NINA-001.
-        this.isNina = (this.chrData && this.chrData.length > 0);
-        
-        this.prgBank = 0;
-        this.chrBank0 = 0;
-        this.chrBank1 = 0;
-        
-        if (!this.isNina) {
-            this.useVRAM(8); // BNROM uses 8KB CHR-RAM
-        }
-        
-        this.reset();
+  getChrPageSize() {
+    return this._isNinaBoard() ? 0x1000 : 0x2000;
+  }
+
+  hasBusConflicts() {
+    return !this._isNinaBoard();
+  }
+
+  registerStartAddress() {
+    return this._isNinaBoard() ? 0x7FFD : 0x8000;
+  }
+
+  registerEndAddress() {
+    return this._isNinaBoard() ? 0x7FFF : 0xFFFF;
+  }
+
+  _getPowerOnByte(defaultValue = 0) {
+    // This codebase does not currently expose RandomizeMapperPowerOnState.
+    return defaultValue & 0xFF;
+  }
+
+  _isNinaBoard() {
+    const mapperId = (this.cartridge && (this.cartridge.mapperType | 0)) || 0;
+    const submapper = (this.cartridge && (this.cartridge.submapper | 0)) || 0;
+
+    if (mapperId !== 34) {
+      return false;
     }
 
-    reset() {
-        this.prgBank = 0;
-        this.chrBank0 = 0;
-        this.chrBank1 = 0;
-        this.updateBanks();
+    // NES 2.0 explicit split:
+    // submapper 1 = NINA-001/002, submapper 2 = BNROM.
+    if (submapper === 1) return true;
+    if (submapper === 2) return false;
 
-        if (this.nes && this.nes.rom) {
-            this.nes.ppu.setMirroring(this.nes.rom.getMirroringType());
-        }
+    // Legacy iNES mapper 34 fallback (Mesen behavior):
+    // CHR-ROM present => NINA-001, otherwise BNROM.
+    // Use constructor-safe sources first (chrData/cartridge.chr), because
+    // BaseMapper caches bus conflicts + register ranges before _chrRomSize
+    // is initialized.
+    const chrLen =
+      (this.chrData && (this.chrData.length | 0)) ||
+      (this.cartridge && this.cartridge.chr && (this.cartridge.chr.length | 0)) ||
+      (this._chrRomSize | 0);
+    return chrLen > 0;
+  }
+
+  _applyBnromBank(value) {
+    this._prgBank = value & 0xFF;
+    // Mesen BNROM uses the full register value (no extra masking).
+    this.SelectPrgPage(0, this._prgBank);
+    this.SelectChrPage(0, 0);
+  }
+
+  _initNina() {
+    this._prgBank = 0;
+    this._chrBank0 = 0;
+    this._chrBank1 = 1;
+    this.SelectPrgPage(0, 0);
+    this.SelectChrPage(0, this._chrBank0);
+    this.SelectChrPage(1, this._chrBank1);
+  }
+
+  initMapper() {
+    if (this._isNinaBoard()) {
+      this._initNina();
+    } else {
+      this._applyBnromBank(this._getPowerOnByte());
+    }
+  }
+
+  reset(softReset = false) {
+    super.reset(softReset);
+    this.initMapper();
+  }
+
+  writeRegister(addr, value) {
+    const address = addr & 0xFFFF;
+    const writeValue = value & 0xFF;
+
+    if (this._isNinaBoard()) {
+      switch (address) {
+        case 0x7FFD:
+          this._prgBank = writeValue & 0x01;
+          this.SelectPrgPage(0, this._prgBank);
+          break;
+        case 0x7FFE:
+          this._chrBank0 = writeValue & 0x0F;
+          this.SelectChrPage(0, this._chrBank0);
+          break;
+        case 0x7FFF:
+          this._chrBank1 = writeValue & 0x0F;
+          this.SelectChrPage(1, this._chrBank1);
+          break;
+      }
+
+      // Mesen NINA-001 writes through PRG RAM at these addresses.
+      this.writePrgRam(address, writeValue);
+      return;
     }
 
-    cpuRead(address) {
-        if (address >= 0x8000) {
-            // Standard 32KB PRG read
-            const slot = (address >> 13) & 0x03;
-            const offset = address & 0x1FFF;
-            return this.prgData[this.prgPagesMap[slot] + offset];
-        }
-        return undefined;
+    this._applyBnromBank(writeValue);
+  }
+
+  toJSON() {
+    return {
+      ...super.toJSON(),
+      mapper034: {
+        mode: this._isNinaBoard() ? "nina" : "bnrom",
+        prgBank: this._prgBank | 0,
+        chrBank0: this._chrBank0 ?? 0,
+        chrBank1: this._chrBank1 ?? 1,
+      },
+    };
+  }
+
+  fromJSON(state) {
+    super.fromJSON(state);
+
+    const s = (state && state.mapper034) || null;
+    if (!s) {
+      this.initMapper();
+      return;
     }
 
-    cpuWrite(address, data) {
-        if (this.isNina) {
-            // NINA-001 Registers ($7FFD-$7FFF)
-            if (address === 0x7FFD) {
-                this.prgBank = data;
-                this.updateBanks();
-            } else if (address === 0x7FFE) {
-                this.chrBank0 = data;
-                this.updateBanks();
-            } else if (address === 0x7FFF) {
-                this.chrBank1 = data;
-                this.updateBanks();
-            }
-        } else {
-            // BNROM: Writes to $8000-$FFFF set PRG bank
-            if (address >= 0x8000) {
-                this.prgBank = data;
-                this.updateBanks();
-            }
-        }
+    if (this._isNinaBoard()) {
+      this._prgBank = (s.prgBank ?? 0) & 0x01;
+      this._chrBank0 = (s.chrBank0 ?? 0) & 0x0F;
+      this._chrBank1 = (s.chrBank1 ?? 1) & 0x0F;
+      this.SelectPrgPage(0, this._prgBank);
+      this.SelectChrPage(0, this._chrBank0);
+      this.SelectChrPage(1, this._chrBank1);
+      return;
     }
 
-    updateBanks() {
-        // PRG Banking (32KB)
-        this.switch32kPrgBank(this.prgBank);
-
-        if (this.isNina) {
-            // NINA-001: Two 4KB CHR banks
-            this.switch4kChrBank(this.chrBank0, true);  // $0000-$0FFF
-            this.switch4kChrBank(this.chrBank1, false); // $1000-$1FFF
-        }
-    }
-
-    toJSON() {
-        return {
-            prgBank: this.prgBank,
-            chrBank0: this.chrBank0,
-            chrBank1: this.chrBank1,
-            isNina: this.isNina
-        };
-    }
-
-    fromJSON(state) {
-        this.prgBank = state.prgBank;
-        this.chrBank0 = state.chrBank0;
-        this.chrBank1 = state.chrBank1;
-        this.isNina = state.isNina;
-        this.updateBanks();
-    }
+    this._applyBnromBank((s.prgBank ?? 0) & 0xFF);
+  }
 }

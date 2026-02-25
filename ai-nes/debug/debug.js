@@ -33,7 +33,7 @@ export class NESDebug {
                 this.debugRequested = true;
             }
         });
-        // console.log(`[NESDebug] Debug module loaded. Press ${key} to output debug data at scanline ${this.targetScanline}.`);
+        console.log(`[NESDebug] Debug module loaded. Press ${key} to output debug data at scanline ${this.targetScanline}.`);
     }
     
     // Check if debug should trigger (call this every scanline)

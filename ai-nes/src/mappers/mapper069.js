@@ -1,267 +1,536 @@
-// Mapper 069: Sunsoft FME-7 / Sunsoft 5B
-// Used by: Gimmick!, Hebereke
-//
-// Features:
-//   - 8KB PRG bank switching ($8000-$DFFF) with fixed last bank
-//   - 1KB CHR bank switching
-//   - Banked RAM/ROM mapping at $6000-$7FFF
-//   - 16-bit CPU cycle IRQ counter
-//   - Sunsoft 5B audio registers at $C000/$E000
-//
-// Notes:
-//   - Sunsoft 5B audio is not emulated; register writes are tracked only.
-//
-// References:
-//   - https://www.nesdev.org/wiki/Sunsoft_FME-7
+import BaseMapper from "./mapper-base.js";
 
-import Mapper from './mapper-base.js';
+const SUNSOFT5B_VOLUME_TABLE = Object.freeze([
+  0.0,
+  0.0015,
+  0.0025,
+  0.0035,
+  0.0050,
+  0.0070,
+  0.0100,
+  0.0140,
+  0.0200,
+  0.0280,
+  0.0390,
+  0.0550,
+  0.0780,
+  0.1100,
+  0.1550,
+  0.2200,
+]);
 
-export default class Mapper069 extends Mapper {
-    constructor(cartridge) {
-        super(cartridge);
+class Sunsoft5BAudio {
+  constructor() {
+    this._registers = new Uint8Array(16);
+    this._tonePeriod = new Uint16Array(3);
+    this._toneCounter = new Uint16Array(3);
+    this._toneOutput = new Uint8Array(3);
+    this.reset();
+  }
 
-        this.command = 0;
-        this.workRamValue = 0;
-        this.irqEnabled = false;
-        this.irqCounterEnabled = false;
-        this.irqCounter = 0;
+  reset() {
+    this._selectedRegister = 0;
+    this._registers.fill(0);
+    this._tonePeriod.fill(1);
+    this._toneCounter.fill(1);
+    this._toneOutput.fill(0);
 
-        this.prgRegs = new Uint8Array(3);
-        this.chrRegs = new Uint8Array(8);
+    this._noisePeriod = 1;
+    this._noiseCounter = 1;
+    this._noiseShift = 0x1ffff;
+    this._noiseOutput = 1;
 
-        this.prgRam = new Uint8Array(0x8000);
-        this.fillRam(this.prgRam);
+    this._envPeriod = 1;
+    this._envCounter = 1;
+    this._envStep = 15;
+    this._envContinue = 0;
+    this._envAttack = 0;
+    this._envAlternate = 0;
+    this._envHold = 0;
+    this._envHolding = false;
 
-        this.audioAddress = 0;
-        this.audioRegs = new Uint8Array(0x10);
+    this._clockDivider = 0;
+  }
 
-        if (!this.chrData || this.chrData.length === 0) {
-            this.useVRAM(8);
-        }
-
-        this.reset();
+  _updateTonePeriod(channel) {
+    const ch = channel | 0;
+    const lo = this._registers[ch * 2] & 0xff;
+    const hi = this._registers[ch * 2 + 1] & 0x0f;
+    let period = ((hi << 8) | lo) & 0x0fff;
+    if (period === 0) {
+      period = 1;
     }
 
-    reset() {
-        this.command = 0;
-        this.workRamValue = 0;
-        this.irqEnabled = false;
-        this.irqCounterEnabled = false;
-        this.irqCounter = 0;
+    this._tonePeriod[ch] = period;
+    if (this._toneCounter[ch] === 0 || this._toneCounter[ch] > period) {
+      this._toneCounter[ch] = period;
+    }
+  }
 
-        this.prgRegs.fill(0);
-        this.chrRegs.fill(0);
-        this.audioAddress = 0;
-        this.audioRegs.fill(0);
-
-        if (this.nes && this.nes.cpu && this.nes.cpu.clearIrq) {
-            this.nes.cpu.clearIrq(this.nes.cpu.IRQ_NORMAL);
-        }
-
-        if (this.nes && this.nes.rom && this.nes.rom.batteryRam && this.nes.rom.batteryRam.length) {
-            const len = Math.min(this.nes.rom.batteryRam.length, this.prgRam.length);
-            this.prgRam.set(this.nes.rom.batteryRam.subarray(0, len));
-        }
-
-        this.updatePrgBanks();
-        this.updateChrBanks();
-        this.updateWorkRam();
-
-        if (this.nes && this.nes.rom) {
-            this.nes.ppu.setMirroring(this.nes.rom.getMirroringType());
-        }
+  _updateNoisePeriod() {
+    let period = this._registers[6] & 0x1f;
+    if (period === 0) {
+      period = 1;
     }
 
-    getOpenBus(address) {
-        return (address >> 8) & 0xFF;
+    this._noisePeriod = period;
+    if (this._noiseCounter === 0 || this._noiseCounter > period) {
+      this._noiseCounter = period;
+    }
+  }
+
+  _updateEnvelopePeriod() {
+    let period = ((this._registers[12] << 8) | this._registers[11]) & 0xffff;
+    if (period === 0) {
+      period = 1;
     }
 
-    updatePrgBanks() {
-        if (!this.prgData || this.prgBankCount === 0) return;
-        this.switch8kPrgBank(this.prgRegs[0] & 0x3F, 0);
-        this.switch8kPrgBank(this.prgRegs[1] & 0x3F, 1);
-        this.switch8kPrgBank(this.prgRegs[2] & 0x3F, 2);
-        this.switch8kPrgBank(this.prgBankCount - 1, 3);
+    this._envPeriod = period;
+    if (this._envCounter === 0 || this._envCounter > period) {
+      this._envCounter = period;
+    }
+  }
+
+  _restartEnvelope(shape) {
+    const value = shape & 0x0f;
+    this._envContinue = (value >> 3) & 0x01;
+    this._envAttack = (value >> 2) & 0x01;
+    this._envAlternate = (value >> 1) & 0x01;
+    this._envHold = value & 0x01;
+    this._envStep = 15;
+    this._envHolding = false;
+    this._envCounter = this._envPeriod;
+  }
+
+  writeRegister(addr, value) {
+    const address = addr & 0xe000;
+    const writeValue = value & 0xff;
+
+    if (address === 0xc000) {
+      this._selectedRegister = writeValue & 0x0f;
+      return;
     }
 
-    updateChrBanks() {
-        for (let i = 0; i < 8; i++) {
-            this.switch1kChrBank(this.chrRegs[i], i);
+    if (address !== 0xe000) {
+      return;
+    }
+
+    const reg = this._selectedRegister & 0x0f;
+    this._registers[reg] = writeValue;
+
+    switch (reg) {
+      case 0:
+      case 1:
+        this._updateTonePeriod(0);
+        break;
+      case 2:
+      case 3:
+        this._updateTonePeriod(1);
+        break;
+      case 4:
+      case 5:
+        this._updateTonePeriod(2);
+        break;
+      case 6:
+        this._updateNoisePeriod();
+        break;
+      case 11:
+      case 12:
+        this._updateEnvelopePeriod();
+        break;
+      case 13:
+        this._restartEnvelope(writeValue);
+        break;
+    }
+  }
+
+  _clockTone(channel) {
+    const ch = channel | 0;
+    let counter = (this._toneCounter[ch] | 0) - 1;
+    if (counter <= 0) {
+      counter = this._tonePeriod[ch] | 0;
+      this._toneOutput[ch] ^= 0x01;
+    }
+    this._toneCounter[ch] = counter & 0xffff;
+  }
+
+  _clockNoise() {
+    let counter = (this._noiseCounter | 0) - 1;
+    if (counter <= 0) {
+      counter = this._noisePeriod | 0;
+
+      // 17-bit LFSR approximation used by AY/YM-family noise.
+      const feedback = ((this._noiseShift ^ (this._noiseShift >> 3)) & 0x01) !== 0 ? 1 : 0;
+      this._noiseShift = ((this._noiseShift >> 1) | (feedback << 16)) & 0x1ffff;
+      this._noiseOutput = this._noiseShift & 0x01;
+    }
+    this._noiseCounter = counter & 0xffff;
+  }
+
+  _clockEnvelope() {
+    if (this._envHolding) {
+      return;
+    }
+
+    let counter = (this._envCounter | 0) - 1;
+    if (counter > 0) {
+      this._envCounter = counter & 0xffff;
+      return;
+    }
+
+    counter = this._envPeriod | 0;
+    this._envStep--;
+
+    if (this._envStep < 0) {
+      if (this._envContinue === 0) {
+        this._envStep = 0;
+        this._envHolding = true;
+      } else if (this._envHold) {
+        if (this._envAlternate) {
+          this._envAttack ^= 0x01;
         }
+        this._envStep = 0;
+        this._envHolding = true;
+      } else {
+        if (this._envAlternate) {
+          this._envAttack ^= 0x01;
+        }
+        this._envStep = 15;
+      }
     }
 
-    updateWorkRam() {
-        this.workRamBank = this.workRamValue & 0x3F;
-        this.workRamUseRam = (this.workRamValue & 0x40) !== 0;
-        this.workRamReadWrite = (this.workRamValue & 0x80) !== 0;
+    this._envCounter = counter & 0xffff;
+  }
+
+  clock(cycles = 1) {
+    const count = Math.max(0, cycles | 0);
+    for (let i = 0; i < count; i++) {
+      // FME-7 clocks the PSG from a divided CPU clock.
+      this._clockDivider ^= 0x01;
+      if (this._clockDivider !== 0) {
+        continue;
+      }
+
+      this._clockTone(0);
+      this._clockTone(1);
+      this._clockTone(2);
+      this._clockNoise();
+      this._clockEnvelope();
+    }
+  }
+
+  _getEnvelopeVolume() {
+    const level = this._envAttack ? this._envStep : (15 - this._envStep);
+    return SUNSOFT5B_VOLUME_TABLE[level & 0x0f];
+  }
+
+  _getChannelSample(channel) {
+    const ch = channel | 0;
+    const mixer = this._registers[7] & 0x3f;
+
+    const toneDisabled = ((mixer >> ch) & 0x01) !== 0;
+    const noiseDisabled = ((mixer >> (ch + 3)) & 0x01) !== 0;
+
+    const tonePass = toneDisabled || (this._toneOutput[ch] !== 0);
+    const noisePass = noiseDisabled || (this._noiseOutput !== 0);
+    if (!tonePass || !noisePass) {
+      return 0;
     }
 
-    writeAudioRegister(address, value) {
-        if ((address & 0xE000) === 0xC000) {
-            this.audioAddress = value & 0x0F;
-        } else {
-            this.audioRegs[this.audioAddress] = value;
-        }
+    const volReg = this._registers[8 + ch] & 0x1f;
+    if ((volReg & 0x10) !== 0) {
+      return this._getEnvelopeVolume();
+    }
+    return SUNSOFT5B_VOLUME_TABLE[volReg & 0x0f];
+  }
+
+  getSample() {
+    return this._getChannelSample(0) + this._getChannelSample(1) + this._getChannelSample(2);
+  }
+
+  toJSON() {
+    return {
+      selectedRegister: this._selectedRegister | 0,
+      registers: Array.from(this._registers),
+      tonePeriod: Array.from(this._tonePeriod),
+      toneCounter: Array.from(this._toneCounter),
+      toneOutput: Array.from(this._toneOutput),
+      noisePeriod: this._noisePeriod | 0,
+      noiseCounter: this._noiseCounter | 0,
+      noiseShift: this._noiseShift | 0,
+      noiseOutput: this._noiseOutput | 0,
+      envPeriod: this._envPeriod | 0,
+      envCounter: this._envCounter | 0,
+      envStep: this._envStep | 0,
+      envContinue: this._envContinue | 0,
+      envAttack: this._envAttack | 0,
+      envAlternate: this._envAlternate | 0,
+      envHold: this._envHold | 0,
+      envHolding: !!this._envHolding,
+      clockDivider: this._clockDivider | 0,
+    };
+  }
+
+  fromJSON(state) {
+    if (!state) {
+      return;
     }
 
-    cpuRead(address) {
-        if (address >= 0x6000 && address < 0x8000) {
-            const offset = address & 0x1FFF;
-            if (this.workRamUseRam) {
-                if (!this.workRamReadWrite) return this.getOpenBus(address);
-                const bankCount = this.prgRam.length >> 13; // >> 13 = / 0x2000
-                const bank = bankCount ? (this.workRamBank % bankCount) : 0;
-                return this.prgRam[(bank << 13) + offset] || 0; // << 13 = * 0x2000
-            }
+    this._selectedRegister = (state.selectedRegister ?? 0) & 0x0f;
 
-            if (!this.prgData || this.prgBankCount === 0) return 0;
-            const bank = this.workRamBank % this.prgBankCount;
-            return this.prgData[(bank << 13) + offset] || 0; // << 13 = * 0x2000
-        }
-
-        if (address >= 0x8000) {
-            if (!this.prgData || this.prgBankCount === 0) return 0;
-            const slot = (address >> 13) & 0x03;
-            const offset = address & 0x1FFF;
-            return this.prgData[this.prgPagesMap[slot] + offset] || 0;
-        }
-        return undefined;
+    if (state.registers) {
+      this._registers = new Uint8Array(state.registers);
+    } else {
+      this._registers.fill(0);
     }
 
-    cpuWrite(address, value) {
-        if (address >= 0x6000 && address < 0x8000) {
-            if (this.workRamUseRam && this.workRamReadWrite) {
-                const bankCount = this.prgRam.length >> 13; // >> 13 = / 0x2000
-                const bank = bankCount ? (this.workRamBank % bankCount) : 0;
-                this.prgRam[(bank << 13) + (address & 0x1FFF)] = value; // << 13 = * 0x2000
-            }
-            return;
-        }
+    if (state.tonePeriod) this._tonePeriod = new Uint16Array(state.tonePeriod);
+    if (state.toneCounter) this._toneCounter = new Uint16Array(state.toneCounter);
+    if (state.toneOutput) this._toneOutput = new Uint8Array(state.toneOutput);
 
-        if (address < 0x8000) return;
+    this._noisePeriod = (state.noisePeriod ?? this._noisePeriod ?? 1) & 0xffff;
+    this._noiseCounter = (state.noiseCounter ?? this._noiseCounter ?? 1) & 0xffff;
+    this._noiseShift = (state.noiseShift ?? this._noiseShift ?? 0x1ffff) & 0x1ffff;
+    this._noiseOutput = (state.noiseOutput ?? this._noiseOutput ?? 1) & 0x01;
 
-        switch (address & 0xE000) {
-            case 0x8000:
-                this.command = value & 0x0F;
-                break;
+    this._envPeriod = (state.envPeriod ?? this._envPeriod ?? 1) & 0xffff;
+    this._envCounter = (state.envCounter ?? this._envCounter ?? 1) & 0xffff;
+    this._envStep = (state.envStep ?? this._envStep ?? 15) & 0xff;
+    this._envContinue = (state.envContinue ?? this._envContinue ?? 0) & 0x01;
+    this._envAttack = (state.envAttack ?? this._envAttack ?? 0) & 0x01;
+    this._envAlternate = (state.envAlternate ?? this._envAlternate ?? 0) & 0x01;
+    this._envHold = (state.envHold ?? this._envHold ?? 0) & 0x01;
+    this._envHolding = !!(state.envHolding ?? this._envHolding ?? false);
+    this._clockDivider = (state.clockDivider ?? this._clockDivider ?? 0) & 0x01;
 
-            case 0xA000:
-                switch (this.command) {
-                    case 0x0:
-                    case 0x1:
-                    case 0x2:
-                    case 0x3:
-                    case 0x4:
-                    case 0x5:
-                    case 0x6:
-                    case 0x7:
-                        this.chrRegs[this.command] = value;
-                        this.updateChrBanks();
-                        break;
-                    case 0x8:
-                        this.workRamValue = value;
-                        this.updateWorkRam();
-                        break;
-                    case 0x9:
-                    case 0xA:
-                    case 0xB:
-                        this.prgRegs[this.command - 0x9] = value & 0x3F;
-                        this.updatePrgBanks();
-                        break;
-                    case 0xC:
-                        if (this.nes && this.nes.ppu) {
-                            switch (value & 0x03) {
-                                case 0x0:
-                                    this.nes.ppu.setMirroring(this.nes.rom.VERTICAL_MIRRORING);
-                                    break;
-                                case 0x1:
-                                    this.nes.ppu.setMirroring(this.nes.rom.HORIZONTAL_MIRRORING);
-                                    break;
-                                case 0x2:
-                                    this.nes.ppu.setMirroring(this.nes.rom.SINGLESCREEN_MIRRORING_A);
-                                    break;
-                                case 0x3:
-                                    this.nes.ppu.setMirroring(this.nes.rom.SINGLESCREEN_MIRRORING_B);
-                                    break;
-                            }
-                        }
-                        break;
-                    case 0xD:
-                        this.irqEnabled = (value & 0x01) === 0x01;
-                        this.irqCounterEnabled = (value & 0x80) === 0x80;
-                        if (this.nes && this.nes.cpu && this.nes.cpu.clearIrq) {
-                            this.nes.cpu.clearIrq(this.nes.cpu.IRQ_NORMAL);
-                        }
-                        break;
-                    case 0xE:
-                        this.irqCounter = (this.irqCounter & 0xFF00) | value;
-                        break;
-                    case 0xF:
-                        this.irqCounter = (this.irqCounter & 0x00FF) | (value << 8);
-                        break;
-                }
-                break;
+    for (let i = 0; i < 3; i++) {
+      if (!this._tonePeriod[i]) this._tonePeriod[i] = 1;
+      if (!this._toneCounter[i]) this._toneCounter[i] = 1;
+    }
+    if (!this._noisePeriod) this._noisePeriod = 1;
+    if (!this._noiseCounter) this._noiseCounter = 1;
+    if (!this._envPeriod) this._envPeriod = 1;
+    if (!this._envCounter) this._envCounter = 1;
+  }
+}
 
-            case 0xC000:
-            case 0xE000:
-                this.writeAudioRegister(address, value);
-                break;
-        }
+// Mapper 069 (Sunsoft FME-7 / Sunsoft 5B)
+// Mesen reference behavior from mesen-sunsoft-fme7.h.
+export default class Mapper069 extends BaseMapper {
+  getPrgPageSize() {
+    return 0x2000;
+  }
+
+  getChrPageSize() {
+    return 0x0400;
+  }
+
+  getWorkRamSize() {
+    return 0x8000;
+  }
+
+  getWorkRamPageSize() {
+    return 0x2000;
+  }
+
+  getSaveRamSize() {
+    return 0x8000;
+  }
+
+  getSaveRamPageSize() {
+    return 0x2000;
+  }
+
+  enableCpuClockHook() {
+    return true;
+  }
+
+  _getExternalIrqId() {
+    if (this.nes && this.nes.cpu && typeof this.nes.cpu.IRQ_EXTERNAL === "number") {
+      return this.nes.cpu.IRQ_EXTERNAL;
+    }
+    return 8;
+  }
+
+  _clearExternalIrq() {
+    if (this.nes && this.nes.cpu && typeof this.nes.cpu.clearIrq === "function") {
+      this.nes.cpu.clearIrq(this._getExternalIrqId());
+    }
+  }
+
+  _triggerIrq() {
+    if (this.nes && this.nes.cpu && typeof this.nes.cpu.requestIrq === "function") {
+      this.nes.cpu.requestIrq(this._getExternalIrqId());
+    }
+  }
+
+  _ensureAudioSource() {
+    if (!this._audio) {
+      this._audio = new Sunsoft5BAudio();
     }
 
-    cpuClock(cpuCycles) {
-        if (!this.irqCounterEnabled) return;
-        for (let i = 0; i < cpuCycles; i++) {
-            this.irqCounter = (this.irqCounter - 1) & 0xFFFF;
-            if (this.irqCounter === 0xFFFF && this.irqEnabled) {
-                if (this.nes && this.nes.cpu && this.nes.cpu.requestIrq) {
-                    this.nes.cpu.requestIrq(this.nes.cpu.IRQ_NORMAL);
-                }
-            }
-        }
+    if (this.nes && this.nes.papu && typeof this.nes.papu.setExpansionAudioSource === "function") {
+      this.nes.papu.setExpansionAudioSource("sunsoft5b", this._audio);
+    }
+  }
+
+  _updateWorkRam() {
+    if ((this._workRamValue & 0x40) !== 0) {
+      const accessType = (this._workRamValue & 0x80) !== 0
+        ? this.MemoryAccessType.ReadWrite
+        : this.MemoryAccessType.NoAccess;
+      const memoryType = this.hasBattery() ? this.PrgMemoryType.SaveRam : this.PrgMemoryType.WorkRam;
+      this.SetCpuMemoryMapping(0x6000, 0x7fff, this._workRamValue & 0x3f, memoryType, accessType);
+    } else {
+      this.SetCpuMemoryMapping(0x6000, 0x7fff, this._workRamValue & 0x3f, this.PrgMemoryType.PrgRom);
+    }
+  }
+
+  _resetState() {
+    this._ensureAudioSource();
+    this._audio.reset();
+
+    this._command = 0;
+    this._workRamValue = 0;
+    this._irqEnabled = false;
+    this._irqCounterEnabled = false;
+    this._irqCounter = 0;
+
+    this.SelectPrgPage(3, -1);
+    this._updateWorkRam();
+    this._clearExternalIrq();
+  }
+
+  initMapper() {
+    this._resetState();
+  }
+
+  reset(softReset = false) {
+    super.reset(softReset);
+    this._resetState();
+  }
+
+  processCpuClock() {
+    if (this._irqCounterEnabled) {
+      this._irqCounter = (this._irqCounter - 1) & 0xffff;
+      if (this._irqCounter === 0xffff && this._irqEnabled) {
+        this._triggerIrq();
+      }
     }
 
-    toJSON() {
-        return {
-            command: this.command,
-            workRamValue: this.workRamValue,
-            irqEnabled: this.irqEnabled,
-            irqCounterEnabled: this.irqCounterEnabled,
-            irqCounter: this.irqCounter,
-            prgRegs: Array.from(this.prgRegs),
-            chrRegs: Array.from(this.chrRegs),
-            prgRam: Array.from(this.prgRam),
-            audioAddress: this.audioAddress,
-            audioRegs: Array.from(this.audioRegs),
-            chrRam: this.usingChrRam ? Array.from(this.chrRam) : null
-        };
+    if (this._audio) {
+      this._audio.clock(1);
+    }
+  }
+
+  _writeCommandData(value) {
+    const writeValue = value & 0xff;
+
+    switch (this._command & 0x0f) {
+      case 0:
+      case 1:
+      case 2:
+      case 3:
+      case 4:
+      case 5:
+      case 6:
+      case 7:
+        this.SelectChrPage(this._command & 0x07, writeValue);
+        break;
+      case 8:
+        this._workRamValue = writeValue;
+        this._updateWorkRam();
+        break;
+      case 9:
+      case 0x0a:
+      case 0x0b:
+        this.SelectPrgPage((this._command & 0x0f) - 9, writeValue & 0x3f);
+        break;
+      case 0x0c:
+        switch (writeValue & 0x03) {
+          case 0:
+            this.SetMirroringType(this.MIRROR_VERTICAL);
+            break;
+          case 1:
+            this.SetMirroringType(this.MIRROR_HORIZONTAL);
+            break;
+          case 2:
+            this.SetMirroringType(this.MIRROR_SINGLE_A);
+            break;
+          case 3:
+            this.SetMirroringType(this.MIRROR_SINGLE_B);
+            break;
+        }
+        break;
+      case 0x0d:
+        this._irqEnabled = (writeValue & 0x01) === 0x01;
+        this._irqCounterEnabled = (writeValue & 0x80) === 0x80;
+        this._clearExternalIrq();
+        break;
+      case 0x0e:
+        this._irqCounter = ((this._irqCounter & 0xff00) | writeValue) & 0xffff;
+        break;
+      case 0x0f:
+        this._irqCounter = ((this._irqCounter & 0x00ff) | (writeValue << 8)) & 0xffff;
+        break;
+    }
+  }
+
+  writeRegister(addr, value) {
+    const address = addr & 0xe000;
+    const writeValue = value & 0xff;
+
+    switch (address) {
+      case 0x8000:
+        this._command = writeValue & 0x0f;
+        break;
+      case 0xa000:
+        this._writeCommandData(writeValue);
+        break;
+      case 0xc000:
+      case 0xe000:
+        if (this._audio) {
+          this._audio.writeRegister(address, writeValue);
+        }
+        break;
+    }
+  }
+
+  toJSON() {
+    return {
+      ...super.toJSON(),
+      mapper069: {
+        command: this._command | 0,
+        workRamValue: this._workRamValue | 0,
+        irqEnabled: !!this._irqEnabled,
+        irqCounterEnabled: !!this._irqCounterEnabled,
+        irqCounter: this._irqCounter | 0,
+        audio: this._audio ? this._audio.toJSON() : null,
+      },
+    };
+  }
+
+  fromJSON(state) {
+    super.fromJSON(state);
+    this._ensureAudioSource();
+
+    const s = (state && state.mapper069) || null;
+    if (!s) {
+      this._resetState();
+      return;
     }
 
-    fromJSON(state) {
-        this.command = state.command || 0;
-        this.workRamValue = state.workRamValue || 0;
-        this.irqEnabled = !!state.irqEnabled;
-        this.irqCounterEnabled = !!state.irqCounterEnabled;
-        this.irqCounter = state.irqCounter || 0;
+    this._command = (s.command ?? 0) & 0x0f;
+    this._workRamValue = (s.workRamValue ?? 0) & 0xff;
+    this._irqEnabled = !!s.irqEnabled;
+    this._irqCounterEnabled = !!s.irqCounterEnabled;
+    this._irqCounter = (s.irqCounter ?? 0) & 0xffff;
 
-        this.prgRegs = new Uint8Array(state.prgRegs || [0, 0, 0]);
-        this.chrRegs = new Uint8Array(state.chrRegs || new Array(8).fill(0));
-
-        this.audioAddress = state.audioAddress || 0;
-        this.audioRegs = new Uint8Array(state.audioRegs || new Array(0x10).fill(0));
-
-        if (state.prgRam) {
-            this.prgRam = new Uint8Array(state.prgRam);
-        }
-
-        if (state.chrRam) {
-            this.chrRam = new Uint8Array(state.chrRam);
-            this.chrData = this.chrRam;
-            this.usingChrRam = true;
-        }
-
-        this.updatePrgBanks();
-        this.updateChrBanks();
-        this.updateWorkRam();
+    if (this._audio) {
+      this._audio.fromJSON(s.audio || null);
     }
+
+    this.SelectPrgPage(3, -1);
+    this._updateWorkRam();
+  }
 }

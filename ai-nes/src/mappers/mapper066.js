@@ -1,71 +1,57 @@
-// Mapper 066: GxROM
-// Used by: Super Mario Bros./Duck Hunt Multi-Cart
-//
-// Features:
-//   - PRG-ROM: 32KB switchable banks
-//   - CHR-ROM: 8KB switchable banks
-//
-// References:
-//   - https://wiki.nesdev.com/w/index.php/GxROM
+import BaseMapper from "./mapper-base.js";
 
-import Mapper from './mapper-base.js';
+// Mapper 066 (GxROM)
+// Mesen reference behavior from mesen-gxrom.h:
+// - PRG: 32KB bank selected by value bits 4-5
+// - CHR: 8KB bank selected by value bits 0-1
+export default class Mapper066 extends BaseMapper {
+  getPrgPageSize() {
+    return 0x8000;
+  }
 
-export default class Mapper066 extends Mapper {
-    constructor(cartridge) {
-        super(cartridge);
-        this.prgBank = 0;
-        this.chrBank = 0;
-        this.reset();
-    }
+  getChrPageSize() {
+    return 0x2000;
+  }
 
-    reset() {
-        this.prgBank = 0;
-        this.chrBank = 0;
-        this.updateBanks();
+  _getPowerOnByte(defaultValue = 0) {
+    // This codebase does not currently expose RandomizeMapperPowerOnState.
+    return defaultValue & 0xFF;
+  }
 
-        // Set mirroring from ROM header
-        if (this.nes && this.nes.rom) {
-            this.nes.ppu.setMirroring(this.nes.rom.getMirroringType());
-        }
-    }
+  _applyRegister(value) {
+    const reg = value & 0xFF;
+    this._reg = reg;
 
-    cpuRead(address) {
-        if (address >= 0x8000) {
-            const slot = (address >> 13) & 0x03;
-            const offset = address & 0x1FFF;
-            return this.prgData[this.prgPagesMap[slot] + offset];
-        }
-        return undefined;
-    }
+    this.SelectPrgPage(0, (reg >> 4) & 0x03);
+    this.SelectChrPage(0, reg & 0x03);
+  }
 
-    cpuWrite(address, data) {
-        if (address >= 0x8000) {
-            // Mapper 66 (GxROM)
-            // 7  bit  0
-            // ---- ----
-            // ..PP ..CC
-            //   ||   ||
-            //   ||   ++- Select 8 KB CHR ROM bank
-            //   ++------ Select 32 KB PRG ROM bank
+  initMapper() {
+    const prgPowerOn = this._getPowerOnByte() & 0x03;
+    const chrPowerOn = this._getPowerOnByte() & 0x03;
+    this._applyRegister((prgPowerOn << 4) | chrPowerOn);
+  }
 
-            this.chrBank = data & 0x03;
-            this.prgBank = (data >> 4) & 0x03;
-            this.updateBanks();
-        }
-    }
+  reset(softReset = false) {
+    super.reset(softReset);
+    this.initMapper();
+  }
 
-    updateBanks() {
-        this.switch32kPrgBank(this.prgBank);
-        this.switch8kChrBank(this.chrBank);
-    }
+  writeRegister(_addr, value) {
+    this._applyRegister(value);
+  }
 
-    toJSON() {
-        return { prgBank: this.prgBank, chrBank: this.chrBank };
-    }
+  toJSON() {
+    return {
+      ...super.toJSON(),
+      mapper066: {
+        reg: this._reg | 0,
+      },
+    };
+  }
 
-    fromJSON(state) {
-        this.prgBank = state.prgBank;
-        this.chrBank = state.chrBank;
-        this.updateBanks();
-    }
+  fromJSON(state) {
+    super.fromJSON(state);
+    this._applyRegister((state && state.mapper066 && state.mapper066.reg) ?? 0);
+  }
 }
