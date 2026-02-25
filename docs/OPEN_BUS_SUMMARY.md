@@ -1,13 +1,13 @@
 # Open Bus Implementation Summary
 
-**Date:** 2026-01-04
-**Status:** ✅ COMPLETE - All major open bus behaviors implemented
+**Date:** 2026-02-24
+**Status:** Complete - All major open bus behaviors implemented
 
 ---
 
 ## Overview
 
-Successfully implemented comprehensive open bus behavior across the entire NES emulator. The CPU data bus now accurately tracks all memory operations and returns the last bus value when reading from unmapped or unimplemented hardware.
+Comprehensive open bus behavior is implemented across the NES emulator. The CPU data bus (`dataBus`) accurately tracks all memory operations and returns the last bus value when reading from unmapped or unimplemented hardware. The PPU has its own separate open bus latch (`ioBus`) with per-bit decay.
 
 ---
 
@@ -21,151 +21,146 @@ This is a critical accuracy feature that many test ROMs verify and some games de
 
 ## Implemented Components
 
-### ✅ 1. CPU Open Bus (Merged Details)
+### 1. CPU Open Bus
 
-**Implementation:** `src/cpu.js:64, 155-157, 169-170`
+**Implementation:** `src/cpu.js`
 
-- Added `this.dataBus` state variable (reset initializes to 0)
-- Updated on **every** `cpuRead()` and `cpuWrite()`
-- Returns `dataBus` for unmapped regions ($4020+)
+- `this.dataBus` state variable (line 59)
+- Updated on **every** `_read()` (lines 384–432) and `_write()` (lines 435–462)
+- Returns `dataBus` for unmapped regions ($4020+ when mapper returns undefined/null)
 - Returns `dataBus` when APU is missing or a register is undefined
-- Persisted through save states via `CPU.JSON_PROPERTIES`
-
-**Before (Incorrect):**
-```javascript
-cpuRead(0x4015) → Returns 0 ❌
-```
-
-**After (Correct):**
-```javascript
-cpuWrite(0x2000, 0x42) → dataBus = 0x42
-cpuRead(0x4015) → Returns 0x42 ✅
-```
+- Persisted through save states via `toJSON()` (line 1440) / `fromJSON()` (line 1490)
 
 **Example Behavior:**
 ```javascript
 // Read from ROM
-cpuRead(0x8000)  → 0xA9 (dataBus = 0xA9)
-cpuRead(0x8001)  → 0x42 (dataBus = 0x42)
-cpuRead(0x5000)  → 0x42 ✅ (open bus)
+_read(0x8000)  → 0xA9 (dataBus = 0xA9)
+_read(0x8001)  → 0x42 (dataBus = 0x42)
+_read(0x5000)  → 0x42 (open bus — mapper returns undefined)
 ```
 
-**Impact:** ~85% → ~92% accuracy
-
 **Test ROMs affected:**
-- `cpu_exec_space` ✅
-- `cpu_dummy_reads` ✅
+- `cpu_exec_space`
+- `cpu_dummy_reads`
 
 ---
 
-### ✅ 2. APU Open Bus (Merged Details)
+### 2. APU Open Bus
 
-**Implementation:** `src/apu.js:993-1014`, `src/cpu.js:141-146`
+**Implementation:** `src/apu.js`
 
-- APU only returns status for $4015 reads
-- All other APU registers ($4000-$4013, $4017) return `undefined`
-- CPU falls back to `dataBus` for undefined values
+- `readReg()` (line 904) returns `undefined` for all registers except `$4015`
+- CPU `_readIORegister()` (lines 464–498) dispatches `$4015` to the APU, everything else returns `dataBus`
 
-**Before (Incorrect):**
 ```javascript
-cpuRead(0x4000) → Returns APU status ($4015 value) ❌
+// src/apu.js:904-905
+readReg(addr) {
+  if (addr !== 0x4015) return undefined;
+  // ... build and return status byte
+}
 ```
 
-**After (Correct):**
-```javascript
-cpuWrite(0x2000, 0x42) → dataBus = 0x42
-cpuRead(0x4000) → Returns 0x42 ✅ (open bus)
-cpuRead(0x4015) → Returns APU status ✅
-```
+The CPU interprets `undefined` as "no device responded" and falls back to `dataBus`:
 
-**Example Behavior:**
 ```javascript
-cpuWrite(0x2000, 0x80) → dataBus = 0x80
-cpuRead(0x4000) → APU returns undefined → CPU uses dataBus → 0x80 ✅
+// src/cpu.js:403-406
+value = this._readIORegister(address);
+this.dataBus = (value === undefined || value === null) ? this.dataBus : (value & 0xFF);
 ```
-
-**Impact:** ~92% → ~94% accuracy
 
 **Registers with open bus:**
 - $4000-$4013: Write-only sound registers
-- $4017: Write-only frame counter
+- $4017: Write-only frame counter (read falls through to `dataBus` in `_readIORegister` default case)
 - $4015: Read/Write status register (only readable APU register)
 
 **Test ROMs affected:**
-- `apu_test/4-jitter` ✅
-- `apu_test/5-len_timing` ✅
+- `apu_test/4-jitter`
+- `apu_test/5-len_timing`
 
 ---
 
-### ✅ 3. OAM DMA Open Bus (Already Correct)
+### 3. OAM DMA Open Bus (Already Correct)
 
-**Implementation:** `src/ppu.js:833-851`
+**Implementation:**
 
 - OAM DMA uses `cpu.cpuRead()` to read 256 bytes
-- Each read automatically updates `dataBus`
+- Each read goes through `_read()` which automatically updates `dataBus`
 - After DMA, `dataBus` contains last byte transferred
-
-**No changes needed** - was already implemented correctly!
 
 ---
 
-### ✅ 4. DMC DMA Open Bus (Merged Details)
+### 4. DMC DMA Open Bus
 
-**Implementation:** `src/apu.js:107`
+**Implementation:** `src/apu.js`
 
-- Changed from `mmap.cpuRead()` to `cpu.cpuRead()`
-- DMC sample reads now update `dataBus`
-- Matches hardware behavior for audio sample fetches
+DMC sample fetches route through the CPU to ensure `dataBus` is updated:
 
-**Before (Incorrect):**
 ```javascript
-this.data = this.papu.nes.mmap.cpuRead(this.playAddress);  // ❌ Bypasses dataBus
-```
-
-**After (Correct):**
-```javascript
-this.data = this.papu.nes.cpu.cpuRead(this.playAddress);  // ✅ Updates dataBus
+// src/apu.js:650-654  (DmcChannel.fetchSample)
+fetchSample() {
+  if (!this.nes || !this.nes.cpu) return;
+  this.nes.cpu.haltCycles(4);
+  const value = this.nes.cpu.cpuRead(this.currentAddress);  // Updates dataBus
+  this.sampleBuffer = value & 0xff;
+  this.bufferEmpty = false;
+  // ...
+}
 ```
 
 **Why It Matters:**
 ```javascript
 // DMC reads sample $42 from $C000 (dataBus = 0x42)
-cpuRead(0x5000) → Returns 0x42 ✅ (open bus uses last DMA value)
+_read(0x5000) → Returns 0x42 (open bus uses last DMA value)
 ```
 
 **Note:** DMC DMA conflicts (dummy reads during CPU access) are not implemented yet.
 
-**Impact:** Minor accuracy improvement for DMC-related test ROMs
-
 **Test ROMs affected:**
-- `dmc_dma_during_read4` ✅ (partial - conflicts not implemented)
+- `dmc_dma_during_read4` (partial - conflicts not implemented)
 
 ---
 
-### ✅ 5. PPU Open Bus (Already Implemented)
+### 5. PPU Open Bus (Per-Bit Decay)
 
-**Implementation:** `src/ppu.js:52` - `ioBus` variable
+**Implementation:** `src/ppu.js`
 
-- PPU has separate `ioBus` latch for write-only registers
-- Reading $2000, $2001, $2003, $2005, $2006 returns `ioBus`
-- Reading $2004 (OAMDATA) and $2007 (PPUDATA) updates `ioBus`
+The PPU open bus is more sophisticated than the CPU's — it uses per-bit decay tracking:
 
-**No changes needed** - was already implemented correctly!
+- `ioBus` (line 37) holds the current open bus value
+- `openBusDecayStamp` (line 38) is a `Uint32Array(8)` tracking when each bit was last refreshed
+- Bits decay to 0 after ~3 frames without being refreshed
+
+```javascript
+// src/ppu.js:432-463  (simplified)
+setOpenBus(mask, value) {
+  // For each bit in mask:
+  //   - If bit is set: update ioBus bit and stamp with current frame
+  //   - If bit is unset: decay to 0 if >3 frames since last stamp
+}
+```
+
+`applyOpenBus(mask, value)` (line 466) is used by PPU register reads to merge hardware-driven bits with decayed open bus bits. For example, `$2002` (PPUSTATUS) only drives bits 7-5; bits 4-0 come from decayed `ioBus`.
+
+**Register behavior:**
+- $2000, $2001, $2003, $2005, $2006: Write-only → returns `ioBus` (with decay)
+- $2002: Bits 7-5 from hardware, bits 4-0 from `ioBus`
+- $2004: OAMDATA readable → updates `ioBus`
+- $2007: PPUDATA readable → updates `ioBus`; palette reads return palette data in bits 5-0 with bits 7-6 from `ioBus`
 
 **Test ROMs:**
-- `ppu_open_bus` ✅ Already passing
+- `ppu_open_bus`
 
 ---
 
-### ✅ 6. Controller Open Bus (Approximation)
+### 6. Controller Open Bus (Approximation)
 
-**Implementation:** `src/controller.js:28`
+**Implementation:** `src/cpu.js` (lines 477–493)
 
-- Controllers return `0x40 | buttonData`
-- Bits 5-7 are open bus (approximated as $40)
+- Controllers return button data from `controller.read()`
+- The controller itself returns `0x40 | buttonData`, approximating the open bus upper bits
 - Good enough for games that check these bits
 
-**Note:** Not a full implementation of open bus (would need CPU data bus integration), but accurate enough for all known games.
+**Note:** Not a full implementation — hardware would merge bits 4-0 from the controller with bits 7-5 from the CPU data bus. Current approximation is accurate for all known games.
 
 ---
 
@@ -174,204 +169,188 @@ cpuRead(0x5000) → Returns 0x42 ✅ (open bus uses last DMA value)
 | Address Range | Open Bus Behavior | Status |
 |---------------|-------------------|--------|
 | $0000-$1FFF | RAM (no open bus) | N/A |
-| $2000-$2001 | PPU write-only → `ioBus` | ✅ Already implemented |
-| $2002 | PPU PPUSTATUS (readable) | ✅ Updates `ioBus` |
-| $2003 | PPU write-only → `ioBus` | ✅ Already implemented |
-| $2004 | PPU OAMDATA (readable) | ✅ Updates `ioBus` |
-| $2005-$2006 | PPU write-only → `ioBus` | ✅ Already implemented |
-| $2007 | PPU PPUDATA (readable) | ✅ Updates `ioBus` |
-| $4000-$4013 | APU write-only → `dataBus` | ✅ Implemented |
-| $4014 | OAM DMA (write-only) | ✅ Updates `dataBus` on reads during DMA |
-| $4015 | APU status (readable) | ✅ Updates `dataBus` |
-| $4016-$4017 | Controllers (readable) | ✅ Approximates open bus ($40) |
-| $4018-$401F | Normally disabled → `dataBus` | ✅ Implemented |
-| $4020-$FFFF | Mapper/ROM → `dataBus` if unmapped | ✅ Implemented |
+| $2000-$2001 | PPU write-only → `ioBus` (with per-bit decay) | Implemented |
+| $2002 | PPU PPUSTATUS: bits 7-5 hardware, bits 4-0 `ioBus` | Implemented |
+| $2003 | PPU write-only → `ioBus` | Implemented |
+| $2004 | PPU OAMDATA (readable) → updates `ioBus` | Implemented |
+| $2005-$2006 | PPU write-only → `ioBus` | Implemented |
+| $2007 | PPU PPUDATA (readable) → updates `ioBus` | Implemented |
+| $4000-$4013 | APU write-only → `dataBus` | Implemented |
+| $4014 | OAM DMA (write-only) → updates `dataBus` on reads during DMA | Implemented |
+| $4015 | APU status (readable) → updates `dataBus` | Implemented |
+| $4016-$4017 | Controllers (readable) → approximates open bus ($40) | Implemented |
+| $4018-$401F | Normally disabled → `dataBus` | Implemented |
+| $4020-$FFFF | Mapper/ROM → `dataBus` if unmapped | Implemented |
 
 ---
 
 ## Code Flow
 
 ### Read Flow
+
 ```javascript
-cpuRead(addr) {
+// src/cpu.js:384-432 — _read(addr)
+_read(addr) {
+  const address = addr & 0xFFFF;
   let value;
 
-  if (addr < 0x2000) {
-    value = RAM[addr];
-  } else if (addr < 0x4000) {
-    value = PPU.readRegister(addr);  // Updates PPU ioBus
-  } else if (addr < 0x4020) {
-    if (addr === 0x4016/0x4017) {
-      value = Controller.read();  // Returns 0x40 | data
-    } else if (APU) {
-      value = APU.readReg(addr);  // Only $4015 returns value
-      if (value === undefined) {
-        value = this.dataBus;  // Open bus for other APU registers
-      }
-    } else {
-      value = this.dataBus;  // No APU = open bus
-    }
-  } else {
-    value = Mapper.cpuRead(addr);  // ROM or open bus
+  if (address < 0x2000) {
+    value = this.ram[address & 0x07FF];
+    this.dataBus = value & 0xFF;
+    return this.dataBus;
   }
 
-  this.dataBus = value;  // ✅ Update bus on EVERY read
-  return value;
+  if (address < 0x4000) {
+    value = this.nes.ppu.readRegister(address & 0x07);  // Updates PPU ioBus
+    this.dataBus = (value === undefined || value === null) ? this.dataBus : (value & 0xFF);
+    return this.dataBus;
+  }
+
+  if (address < 0x4018) {
+    value = this._readIORegister(address);  // $4015→APU, $4016/$4017→controllers, else→dataBus
+    this.dataBus = (value === undefined || value === null) ? this.dataBus : (value & 0xFF);
+    return this.dataBus;
+  }
+
+  // $4018-$FFFF: mapper cpuRead, fall back to dataBus if undefined
+  if (this.nes.mmap) {
+    value = this.nes.mmap.cpuRead(address);
+    if (value !== undefined && value !== null) {
+      this.dataBus = value & 0xFF;
+      return this.dataBus;
+    }
+  }
+  return this.dataBus;  // Open bus
 }
 ```
 
 ### Write Flow
-```javascript
-cpuWrite(addr, value) {
-  this.dataBus = value;  // ✅ Update bus on EVERY write
 
-  if (addr < 0x2000) {
-    RAM[addr] = value;
-  } else if (addr < 0x4000) {
-    PPU.writeRegister(addr, value);
-  } else if (addr === 0x4014) {
-    PPU.doDMA(value);  // Reads 256 bytes via cpuRead()
-  } else if (addr === 0x4016) {
-    Controller.strobe(value);
-  } else if (APU) {
-    APU.writeReg(addr, value);
+```javascript
+// src/cpu.js:435-462 — _write(addr, value)
+_write(addr, value) {
+  const address = addr & 0xFFFF;
+  const writeValue = value & 0xFF;
+
+  this.dataBus = writeValue;  // Update bus on EVERY write
+  this.mem[address] = writeValue;
+
+  if (address < 0x2000) {
+    this.ram[address & 0x07FF] = writeValue;
+  } else if (address < 0x4000) {
+    this.nes.ppu.writeRegister(address & 0x07, writeValue);
+  } else if (address < 0x4018) {
+    this._writeIORegister(address, writeValue);
   } else {
-    Mapper.cpuWrite(addr, value);
+    this.nes.mmap.cpuWrite(address, writeValue);
   }
 }
 ```
 
-### DMA Flow
+### IO Register Dispatch
+
 ```javascript
-// OAM DMA
-doDMA(page) {
-  for (let i = 0; i < 256; i++) {
-    let value = cpu.cpuRead(page * 256 + i);  // ✅ Updates dataBus 256 times
-    OAM[i] = value;
-  }
-}
+// src/cpu.js:464-498 — _readIORegister(addr)
+_readIORegister(addr) {
+  switch (addr) {
+    case 0x4015:
+      // APU status — only readable APU register
+      value = this.nes.papu.readReg(address);
+      return (value !== undefined) ? (value & 0xFF) : this.dataBus;
 
-// DMC DMA
-nextSample() {
-  this.data = cpu.cpuRead(address);  // ✅ Updates dataBus
-  cpu.haltCycles(4);
+    case 0x4016:
+      // Controller 1
+      value = this.nes.controllers[1].read() & 0xFF;
+      this.nes.controllers[1].clock();
+      return value;
+
+    case 0x4017:
+      // Controller 2
+      value = this.nes.controllers[2].read() & 0xFF;
+      this.nes.controllers[2].clock();
+      return value;
+
+    default:
+      return this.dataBus;  // Open bus for $4000-$4014, $4018+
+  }
 }
 ```
 
----
+### DMC Fetch Flow
 
-## Accuracy Improvement
-
-| Before | After |
-|--------|-------|
-| CPU open bus: ❌ Returns 0 | CPU open bus: ✅ Returns dataBus |
-| APU open bus: ❌ Returns $4015 status | APU open bus: ✅ Returns dataBus |
-| DMC DMA: ❌ Doesn't update bus | DMC DMA: ✅ Updates dataBus |
-| OAM DMA: ✅ Already correct | OAM DMA: ✅ Already correct |
-| PPU open bus: ✅ Already correct | PPU open bus: ✅ Already correct |
-| **Overall accuracy: ~85%** | **Overall accuracy: ~94%** |
-
----
-
-## Test ROM Results
-
-### Expected to Pass After Implementation
-
-1. ✅ `cpu_exec_space` - CPU execution in unmapped regions
-2. ✅ `cpu_dummy_reads` - CPU dummy read behavior
-3. ✅ `apu_test/4-jitter` - APU register open bus
-4. ✅ `apu_test/5-len_timing` - APU timing accuracy
-5. ✅ `dmc_dma_during_read4` - DMC DMA behavior (partial)
-
-### Already Passing (No Change)
-
-1. ✅ `ppu_open_bus` - PPU open bus (already implemented)
-2. ✅ `ppu_vbl_nmi` - VBlank timing
-3. ✅ `ppu_sprite_hit` - Sprite 0 hit
-4. ✅ `ppu_sprite_overflow` - Sprite overflow bug
+```javascript
+// src/apu.js:650-654 — DmcChannel.fetchSample()
+fetchSample() {
+  this.nes.cpu.haltCycles(4);
+  const value = this.nes.cpu.cpuRead(this.currentAddress);  // Updates dataBus
+  this.sampleBuffer = value & 0xff;
+  this.bufferEmpty = false;
+  // ...
+}
+```
 
 ---
 
 ## Edge Cases Handled
 
-1. ✅ **Power-on state**: `dataBus` initialized to 0 (close enough to random)
-2. ✅ **Reset**: `dataBus` reset to 0
-3. ✅ **Save states**: `dataBus` included in CPU state serialization
-4. ✅ **All reads**: Every read updates `dataBus` (RAM, ROM, PPU, APU, controllers, mapper)
-5. ✅ **All writes**: Every write updates `dataBus`
-6. ✅ **DMA transfers**: Both OAM and DMC DMA update `dataBus`
-7. ✅ **Undefined APU registers**: Return `undefined`, CPU uses `dataBus`
-8. ✅ **Missing APU**: CPU returns `dataBus` if APU not initialized
+1. **Power-on state**: `dataBus` initialized to 0 (close enough to random)
+2. **Reset**: `dataBus` reset to 0
+3. **Save states**: `dataBus` included in CPU `toJSON()`/`fromJSON()` (lines 1440/1490)
+4. **All reads**: Every `_read()` updates `dataBus` (RAM, ROM, PPU, APU, controllers, mapper)
+5. **All writes**: Every `_write()` updates `dataBus` as first operation
+6. **DMA transfers**: Both OAM and DMC DMA go through `cpuRead()` → `_read()`, updating `dataBus`
+7. **Undefined APU registers**: `readReg()` returns `undefined`, CPU uses `dataBus`
+8. **Missing hardware**: CPU returns `dataBus` if PPU/APU/mapper not initialized
+9. **PPU bit decay**: `ioBus` bits decay to 0 after ~3 frames without refresh via `openBusDecayStamp`
 
 ---
 
 ## Performance Impact
 
-**Negligible** - Just one additional assignment per memory operation
+**Negligible** — one additional assignment per memory operation.
 
 - Modern JavaScript engines optimize this extremely well
 - No measurable frame rate impact
-- Memory overhead: +1 byte per CPU instance
+- Memory overhead: +1 byte per CPU instance (PPU: +33 bytes for `ioBus` + 8×uint32 decay stamps)
 
 ---
 
-## Not Implemented (Phase 3 - Low Priority)
+## Not Implemented (Low Priority)
 
 ### Controller Open Bus (Full Implementation)
 - **Current:** Returns $40 for bits 5-7
-- **Hardware:** Should return actual CPU data bus for bits 5-7
-- **Impact:** Negligible - no known games depend on this
+- **Hardware:** Should return actual CPU data bus for bits 7-5
+- **Impact:** Negligible — no known games depend on this
 
 ### DMC DMA Conflicts
-- **Current:** DMC DMA halts CPU cleanly
+- **Current:** DMC DMA halts CPU cleanly via `haltCycles(4)`
 - **Hardware:** DMC can cause dummy reads during conflicts
-- **Impact:** Very low - only affects cycle-accurate test ROMs
+- **Impact:** Very low — only affects cycle-accurate test ROMs
 
 ### NMI/BRK Overlap
 - **Current:** BRK completes before NMI is checked
 - **Hardware:** NMI can hijack BRK mid-execution
-- **Impact:** Extremely low - almost no games use BRK
+- **Impact:** Extremely low — almost no games use BRK
 
 ---
 
-## Files Modified
+## Files
 
-1. **`src/cpu.js`**
-   - Added `dataBus` state variable (line 64)
-   - Track `dataBus` on all reads (line 155-157)
-   - Track `dataBus` on all writes (line 169-170)
-   - Handle APU undefined returns (line 141-146)
-   - Added `dataBus` to save state (line 27)
+1. **src/cpu.js**
+   - `dataBus` state variable (line 59)
+   - `_read()` — tracks `dataBus` on all reads (lines 384–432)
+   - `_write()` — tracks `dataBus` on all writes (lines 435–462)
+   - `_readIORegister()` — IO dispatch with open bus fallback (lines 464–498)
+   - `toJSON()` — persists `dataBus` (line 1440)
+   - `fromJSON()` — restores `dataBus` (line 1490)
 
-2. **`src/apu.js`**
-   - Check address in `readReg()` (line 993-1014)
-   - Return undefined for non-$4015 registers
-   - Use `cpu.cpuRead()` for DMC DMA (line 107)
+2. **src/apu.js**
+   - `readReg()` — returns `undefined` for non-$4015 (line 904–905)
+   - `DmcChannel.fetchSample()` — uses `cpu.cpuRead()` for bus tracking (lines 650–654)
 
-3. **`src/ppu.js`** - No changes (already correct)
-4. **`src/controller.js`** - No changes (already correct)
+3. **src/ppu.js**
+   - `ioBus` latch (line 37) + `openBusDecayStamp` per-bit decay (line 38)
+   - `setOpenBus(mask, value)` — bit-level open bus update with decay (lines 432–463)
+   - `applyOpenBus(mask, value)` — merge hardware bits with decayed open bus (lines 466–468)
 
----
-
-## Documentation Created
-
-1. This summary document (includes CPU/APU/DMC open bus details)
-
----
-
-## Status
-
-✅ **COMPLETE** - All major open bus behaviors implemented and tested
-
-**Phase 2 Progress:** 3 out of 4 items completed
-- ✅ CPU Open Bus
-- ✅ APU Open Bus
-- ✅ DMC DMA Open Bus
-- ❌ Controller Double-Read (attempted, reverted)
-
-**Current Accuracy:** ~94% (up from ~85%)
-
-**Recommended Next Steps:**
-1. Run test ROM suite to validate improvements
-2. Test with games that were previously broken
-3. Consider Phase 3 improvements if needed
+4. **src/controller.js** — returns `0x40 | buttonData` (approximation)
