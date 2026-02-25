@@ -24,22 +24,19 @@ The emulator is built on a modular design that mirrors the physical components o
 
 ## 3. CPU Core & PPU Synchronization
 
-Achieving timing accuracy between the CPU and PPU was a primary focus.
+Achieving timing accuracy between the CPU and PPU was a primary focus. The synchronization model evolved over several iterations.
 
-- **Cycle-Accurate Stepping:** `cpu.step()` executes one instruction and returns a cycle count. The main loop clocks the APU for that count and advances the PPU by `cycles * 3`, preserving the 1:3 CPU/PPU ratio.
+- **Cycle-Accurate Stepping:** `cpu.step()` executes one instruction and returns a cycle count. The main loop clocks the APU for that count.
 
-- **The `catchUp()` Mechanism:** A critical feature for raster effects is ensuring the PPU state is correct at the exact moment the CPU reads or writes to a PPU register (e.g., `$2002`).
-  - The `cpu.emulate()` method calculates `cycleOffset`, which tracks which cycle *within* the current instruction a memory access occurs.
-  - Before any PPU register access, `nes.catchUp()` is called. This method runs the PPU forward by the required number of cycles to "catch up" to the CPU, ensuring perfect synchronization for status polling and mid-scanline effects.
-  - **Mapper Synchronization:** `nes.catchUp()` is also called before mapper writes. This ensures that mapper state changes (like IRQ counters or banking) happen at the precise CPU cycle relative to the PPU, fixing timing-sensitive games like *G.I. Joe*.
+- **Evolution of the Timing Model:**
+  - *Early approach:* An external `catchUp()` mechanism ran the PPU forward in bursts before PPU register accesses, with `cycleOffset` tracking sub-instruction timing and `cpuCyclesToSkip` preventing double-counting.
+  - *Current approach:* `NES.catchUp()` is intentionally a **no-op**. The CPU now internally clocks the PPU and mapper on every bus access cycle via `_startCycle()` and `_endCycle()`. Each `_startCycle()` call increments CPU cycle counters, clocks the PPU (`ppu.clockCpuCycle()`), and clocks mapper hooks (`mapper.step(1)` + `mapper.cpuClock(1)`). This eliminates the need for external catch-up scheduling entirely — PPU and mapper state is always in sync at every cycle boundary.
 
-- **Cycle Interleaving for Mapper Accuracy:** To support complex mappers like MMC5 that rely on precise timing between CPU cycles and PPU fetches (e.g., for "in-frame" detection), the `catchUp()` mechanism was enhanced. Instead of running the PPU in a burst, it now strictly interleaves PPU steps (3 cycles) and Mapper clocks (1 cycle). Additionally, a `cpuCyclesToSkip` counter ensures that mapper clocks are not double-counted in the main frame loop if they were already processed during a `catchUp()` event.
-
-- **PPU Dummy Fetches:** To support mappers that rely on "snooping" the PPU bus for state detection (like MMC5's scanline detection), the PPU was updated to perform dummy nametable fetches at cycles 337 and 339. These fetches are unused by the PPU itself but are critical for the mapper to detect the end of a scanline.
+- **PPU Dummy Fetches:** To support mappers that rely on "snooping" the PPU bus for state detection (like MMC5's scanline detection), the PPU performs dummy nametable fetches at cycles 337 and 339. These fetches are unused by the PPU itself but are critical for the mapper to detect the end of a scanline.
 
 - **Hardware-Accurate Instruction Behavior:**
-  - **Read-Modify-Write (RMW) Instructions:** Instructions like `ASL`, `DEC`, `INC`, `LSR`, `ROL`, and `ROR` were updated to perform a "dummy write" of the original value back to memory before writing the modified value. This is a subtle hardware behavior required by some mappers and hardware tests.
-  - **Cycle Counting:** The cycle counting logic was refined to correctly account for penalties from page-crosses and taken branches, ensuring the total duration of every instruction is accurate.
+  - **Read-Modify-Write (RMW) Instructions:** Instructions like `ASL`, `DEC`, `INC`, `LSR`, `ROL`, and `ROR` perform a "dummy write" of the original value back to memory before writing the modified value. This is a subtle hardware behavior required by some mappers and hardware tests.
+  - **Cycle Counting:** The cycle counting logic correctly accounts for penalties from page-crosses and taken branches, ensuring the total duration of every instruction is accurate.
 
 ## 4. APU Implementation & Refinement
 
@@ -50,9 +47,9 @@ A complete audit and refactoring of the APU (Audio Processing Unit) was performe
   - Uses a 15-bit shift register.
   - Feedback is calculated using Bit 0 XOR Bit 1 (Mode 0) or Bit 0 XOR Bit 6 (Mode 1).
   - This fixes sound effects in games like *Contra* (explosions) and *Balloon Fight*.
-- **Architecture:** Refactored channel logic into modular classes (`ChannelSquare`, `ChannelTriangle`, `ChannelNoise`, `ChannelDM`) with standardized `clockTimer()` methods.
-- **Mixing:** Unified the sampling and mixing pipeline for consistent volume levels and stereo positioning.
-- **Expansion Audio:** Mapper audio sources (e.g., MMC5 pulse + PCM) register with the APU and are mixed into the stereo output before DC removal.
+- **Architecture:** Refactored channel logic into modular classes (`SquareChannel`, `TriangleChannel`, `NoiseChannel`, `DmcChannel`) with standardized timer clocking methods.
+- **Mixing:** Unified the sampling and mixing pipeline with non-linear NES-style lookup tables (16x resolution DAC), per-channel stereo panning, and DC offset removal.
+- **Expansion Audio:** Mapper audio sources register with the APU via `papu.setExpansionAudioSource(name, source)` and are mixed into the stereo output before DC removal. Sources implement `getSample()` and optionally `clock(cycles)`.
 
 ## 5. Game Compatibility: The NROM Gauntlet
 
@@ -137,7 +134,7 @@ The implementation of Mapper 3 (CNROM) supports games like *Cybernoid* and *Solo
 ## 9. Mapper 4 (MMC3) Implementation
 
 - **Banking Logic:** Implemented the full MMC3 banking scheme, including switchable PRG modes (swapping fixed/switchable banks) and CHR modes (swapping 1KB and 2KB banks).
-- **IRQ System:** Replaced the simple scanline-based IRQ with a hardware-accurate A12-based counter. The PPU now monitors the PPU address bus and calls the mapper's `clockScanline()` method on every rising edge of the A12 line during rendering. This allows for the precise mid-scanline IRQs required by many advanced MMC3 games.
+- **IRQ System:** Replaced the simple scanline-based IRQ with a hardware-accurate A12-based counter. The mapper declares `enableVramAddressHook() { return true; }`, and the PPU calls `notifyVramAddressChange(addr, context)` on every bus address change. The mapper filters A12 rising edges to clock the IRQ counter. This allows for the precise mid-scanline IRQs required by many advanced MMC3 games.
 
 #### MMC3 IRQ Timing Refinement (Alien 3 & Astyanax)
 
@@ -147,7 +144,7 @@ Achieving compatibility with both *Alien 3* and *Astyanax* required a precise im
 - **The Fix:**
   1.  **Dummy Sprite Fetches:** Updated `ppu.js` to always perform 8 sprite pattern fetches per scanline, even if fewer sprites exist. Unused slots fetch tile `$FF`. This ensures the PPU address bus toggles A12 consistently on every scanline, driving the IRQ counter.
   2.  **A12 Filtering:** Restored the A12 rising edge filter to ignore toggles shorter than 12 cycles. This filters out noise while the dummy fetches provide the legitimate clock signals.
-  3.  **Mapper Write Synchronization:** Added `catchUp()` calls before mapper writes in `cpu.js`. This ensures IRQ reloads and bank switches happen at the correct cycle relative to the PPU.
+  3.  **Mapper Write Synchronization:** The CPU's per-cycle `_startCycle()` pipeline ensures PPU and mapper are always in sync at every bus access, so IRQ reloads and bank switches happen at the correct cycle relative to the PPU.
 
 #### `ppuRead` Robustness
 - **Issue:** Mapper 4 games like *Super Mario Bros. 3* showed minor color corruption.
@@ -165,21 +162,15 @@ The implementation of Mapper 7 (AxROM) enables support for *Battletoads* and *Wi
 - **Banking Mask:** Corrected PRG bank selection to use a 3-bit mask (`& 0x07`) to match hardware.
 - **Game-Specific Fixes:** Enabled bus conflicts specifically for *Golgo 13: The Mafat Conspiracy*.
 
-## 11. Gauntlet (Mapper 206) Compatibility Strategies
+## 11. Gauntlet (Mapper 206) Compatibility
 
-*Gauntlet* (Tengen/Licensed) uses Mapper 206 (DxROM/Namco 108), a subset of MMC3. It presents challenges due to incorrect iNES headers (often claiming Mapper 4) and specific mirroring requirements (Horizontal hardwired, but headers often claim Vertical). We documented two approaches to solving this:
+*Gauntlet* (Tengen/Licensed) uses Mapper 206 (DxROM/Namco 108), a subset of MMC3. It presents challenges due to incorrect iNES headers (often claiming Mapper 4) and specific mirroring requirements (Horizontal hardwired, but headers often claim Vertical). Two approaches were considered:
 
-### Strategy A: Explicit Mapper Implementation (Robust - Active)
-1.  **Dedicated Class:** A `Mapper206` class (extending `Mapper004`) overrides `cpuWrite` to ignore MMC3-specific registers (Mirroring, IRQ) that don't exist on DxROM.
-2.  **Factory Override:** `mapper-factory.js` detects Gauntlet via CRC32 and forces instantiation of `Mapper206`.
-3.  **Pros:** Most hardware-accurate; prevents game code from accidentally triggering MMC3 features.
-4.  **Implementation:** This is the currently active strategy for feature completeness.
+### Strategy A: Explicit Mapper Implementation (Considered)
+A dedicated `Mapper206` class extending `Mapper004` would override `cpuWrite` to ignore MMC3-specific registers (Mirroring, IRQ) that don't exist on DxROM. This was considered but not implemented.
 
-### Strategy B: Mapper Aliasing & Compatibility Database (Minimalist)
-1.  **Factory Alias:** In `mapper-factory.js`, Mapper 206 is simply aliased to `Mapper004` (`206: Mapper004`).
-2.  **Compatibility Fix:** `compatibility.js` detects Gauntlet via CRC32 and forces **4-Screen Mirroring**.
-3.  **Why it works:** Since DxROM is a subset of MMC3, `Mapper004` logic handles the banking correctly. The 4-Screen mirroring override prevents the game (or incorrect header) from misconfiguring the nametables, resolving the "walking through walls" glitch without needing a separate mapper class.
-4.  **Implementation:** This strategy can be employed to reduce code complexity.
+### Strategy B: Compatibility Database (Active)
+The active approach uses `compatibility.js` to detect Gauntlet via CRC32 and force **4-Screen Mirroring**. Since DxROM is a subset of MMC3, `Mapper004` logic handles the banking correctly. The 4-Screen mirroring override prevents the game (or incorrect header) from misconfiguring the nametables, resolving the "walking through walls" glitch without needing a separate mapper class.
 
 ## 12. Debugging & Snapshot Tooling
 
@@ -193,7 +184,7 @@ Verification tools were added to make regression testing and accuracy comparison
 *StarTropics* uses the MMC6 mapper, which is a variant of MMC3 (Mapper 4) with unique PRG-RAM protection.
 
 - **The Issue:** The game writes to `$A001` to configure MMC6-specific RAM settings (individual 512-byte block protection). Standard MMC3 interprets this as globally disabling WRAM, causing save failures.
-- **The Fix:** Implemented a dedicated `Mapper006` class that extends `Mapper004`. It overrides `cpuWrite` to intercept `$A001` and implements the correct MMC6 RAM protection logic (1KB internal RAM mirrored at `$7000-$7FFF`). `mapper-factory.js` detects *StarTropics* via CRC32 and instantiates `Mapper006`.
+- **The Fix:** Implemented a dedicated `Mapper006` class that extends `Mapper004`. It overrides `cpuWrite` to intercept `$A001` and implements the correct MMC6 RAM protection logic (1KB internal RAM mirrored at `$7000-$7FFF`). `mapper-factory.js` detects *StarTropics* (and *Zoda's Revenge*) via CRC32 hashes in `MMC6_COMPAT_CRC32` and instantiates `Mapper006` when the ROM header claims Mapper 4 with legacy submapper 0. NES 2.0 headers with explicit submapper 1 also route to `Mapper006` directly.
 
 ## 15. Mapper 9 (MMC2) Implementation
 
@@ -212,20 +203,20 @@ The implementation of Mapper 5 (MMC5) required significant architectural upgrade
   - A new `readNametable` hook was added for ExRAM support.
   - A new `onEndScanline` hook was added to drive the scanline-compare IRQ.
 - **Implementation:** `Mapper005` now implements PRG/CHR banking modes, ExRAM modes, fill mode, split-screen control, scanline IRQ + multiplier, and timer logic.
-- **Audio:** MMC5 pulse + PCM audio is implemented in `mapper005-audio.js` and mixed via the APU expansion path (PCM IRQs are not yet implemented).
+- **Audio:** MMC5 audio is implemented as the `Mmc5Audio` class embedded in `mapper005.js`. Register state is tracked and the module is registered with the APU expansion path, but `getSample()` currently returns 0 (audio output is a stub).
 
 ## 17. Future Roadmap
 
-- **Accuracy:** Implement unofficial opcodes, refine controller double-read timing, verify $2007 read buffer behavior, and consider OAM decay + DMC DMA conflicts.
+- **Accuracy:** Refine controller double-read timing, and consider OAM decay + DMC DMA conflicts.
+- **Audio:** Complete MMC5 pulse + PCM audio synthesis (currently a stub returning 0).
+- **Note:** Unofficial opcodes are now implemented (SLO, RLA, SRE, RRA, SAX, LAX, DCP, ISB, AAC, ASR, ARR, ATX, AXS, SHY, SHX, SHAA, SHAZ, TAS, ANE, LAS, HLT).
 
 ## 18. Zapper (Light Gun) Implementation
 
 Support for the NES Zapper peripheral was added to enable games like *Duck Hunt* and *Hogan's Alley*.
 
-- **Input Handling:** Mouse coordinates are mapped to NES screen coordinates (256x240) in `nes-init.js`, accounting for CSS scaling and letterboxing.
-- **Light Sensing:** The `CPU` class implements the light sensor logic on port `$4017`.
-  - **Timing:** `nes.catchUp()` is called before reading `$4017` to ensure the PPU is at the exact cycle corresponding to the CPU instruction.
-  - **Hit Detection:** The emulator checks if the PPU's electron beam is currently within a radius (8 pixels) of the mouse cursor and if the pixel being rendered is bright (white). This simulates the photodiode's behavior and latency.
+- **Input Handling:** Mouse coordinates are mapped to NES screen coordinates (256x240) in `nes-init.js`, accounting for CSS scaling and letterboxing. Mouse events drive `nes.zapperMove(x, y)`, `nes.zapperFireDown()`, and `nes.zapperFireUp()`.
+- **Controller Port:** The Zapper is read via Controller 2 on port `$4017`. The CPU's `_readIORegister()` dispatches `$4017` reads to `controllers[2]`, which returns trigger and light-sense bits. The CPU's per-cycle timing model ensures PPU state is always in sync when the read occurs.
 
 ## 19. Mapper Library Expansion
 
@@ -235,7 +226,7 @@ Several mappers were added or fixed to support specific titles:
 - **Mapper 34 (BNROM / NINA-001):** Implemented support for *Deadly Towers* and *Impossible Mission II*. The mapper heuristically detects NINA-001 boards by the presence of CHR-ROM.
 - **Mapper 66 (GxROM):** Added for *Super Mario Bros. / Duck Hunt*.
 - **Mapper 79 (NINA-03/06):** Added for *Metal Fighter*.
-- **Mapper 69 (Sunsoft FME-7 / 5B):** Added PRG/CHR banking, IRQ counter, and tracked audio register writes (audio not mixed).
+- **Mapper 69 (Sunsoft FME-7 / 5B):** Added PRG/CHR banking, CPU-cycle IRQ counter, and full Sunsoft 5B expansion audio (3-channel tone generator with envelope, actively synthesized and mixed into APU output via the expansion audio bus).
 - **Mapper Fixes:**
   - **Mapper 0 (NROM):** Fixed mirroring initialization to resolve scrolling artifacts in *Super Mario Bros.*.
   - **Mapper 7 (AxROM) & 11 (Color Dreams):** Added missing `cpuRead` implementations to prevent crashes.
@@ -243,8 +234,8 @@ Several mappers were added or fixed to support specific titles:
 ## 20. Audio Accuracy Refinements
 
 - **Noise Channel LFSR Fix:** A critical bug was identified where the noise channel's output (`randomBit`) was not updating after every shift of the Linear Feedback Shift Register. Fixing this restored missing percussion in *Super Mario Bros. 3* and explosion sound effects in *Contra*.
-- **Expansion Audio Mixing:** MMC5 pulse + PCM audio is mixed into the APU output through the expansion audio path.
-- **Audio Output Buffering:** Audio is batched into 4096-sample chunks and queued into a 16384-sample AudioWorklet ring buffer. The main loop tracks queue depth via `audioCtx.currentTime` to keep roughly 80ms of audio buffered, with a prefill on boot and small top-ups per frame to avoid underruns during UI stalls. The APU sample rate is synced to the AudioContext rate to prevent drift.
+- **Expansion Audio Mixing:** Mapper audio sources (currently Sunsoft 5B) are mixed into the APU output through the expansion audio bus. MMC5 audio registers are tracked but output is currently a stub.
+- **Audio Output Buffering:** Audio is batched into 4096-sample chunks and queued into an 8192-sample AudioWorklet ring buffer. The main loop tracks queue depth via `audioCtx.currentTime` to keep roughly 80ms of audio buffered, with a prefill on boot and small top-ups per frame to avoid underruns during UI stalls. The APU sample rate is synced to the AudioContext rate to prevent drift.
 
 ## 21. Advanced Hardware Accuracy & Edge Cases
 
@@ -261,7 +252,7 @@ Recent updates have focused on "deep" hardware quirks and edge cases required fo
 - **OAM Overflow Bug:** Implemented the "sprite overflow bug." When more than 8 sprites are on a scanline, the PPU's sprite evaluation logic malfunctions, incorrectly incrementing a byte offset and reading garbage data (often interpreting Y-coordinates as tile indices or attributes) for subsequent overflow checks.
 - **NMI Suppression:** Implemented the race condition where reading `PPUSTATUS` (`$2002`) at the exact start of VBlank clears the VBlank flag and suppresses the NMI signal. Added a 3-cycle delay to the NMI trigger to accurately model this window.
 - **Grayscale Mode:** Added support for the grayscale bit in `PPUMASK` (`$2001`), used by games like *Street Fighter 2010* for visual effects.
-- **Open Bus:** PPU write-only register reads return the `ioBus` latch to emulate open bus behavior.
+- **Open Bus:** PPU write-only register reads return the `ioBus` latch with per-bit decay tracking (`openBusDecayStamp`) to emulate open bus behavior. Bits decay to 0 after ~3 frames without refresh.
 
 ### APU
 - **Pulse Sweep Muting:** Refined the sweep unit logic to continuously check the target period against the `$7FF` limit, muting the channel if exceeded regardless of whether the sweep is enabled. This fixes "missing notes" in games like *Super Spike V'Ball*.
