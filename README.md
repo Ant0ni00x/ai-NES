@@ -7,13 +7,13 @@ A modernized Nintendo Entertainment System (NES) emulator written in JavaScript.
 * ✅ **Pure JavaScript** - Runs in any modern browser, no plugins required
 * ✅ **ES6 Modules** - Clean, maintainable codebase with proper imports/exports
 * ✅ **Modern Audio** - AudioWorklet-based sound system
-* ✅ **Expansion Audio Mixing** - MMC5 pulse + PCM audio mixed into APU output
-* ✅ **Capability‑Driven Mappers** - The PPU interacts with mappers strictly through declared behavioral capabilities (no mapper IDs, no method‑presence heuristics)
-* ✅ **Accurate Mapper Emulation** - Correct MMC1, MMC2, MMC3, MMC4, MMC5, and Sunsoft FME-7 (Mapper 069) behavior
+* ✅ **Expansion Audio Bus** - Expansion sources are mixed into APU output (Sunsoft 5B synthesis active; MMC5 register path wired)
+* ✅ **Mapper-Agnostic Core** - CPU/PPU interact through mapper hook surfaces and capability flags, not per-mapper branching in CPU/PPU logic
+* ✅ **Accurate Mapper Emulation** - Implemented set includes MMC1/MMC2/MMC3/MMC4/MMC5, VRC2/4 variants, FME-7, and more
 * ✅ **CHR Latch Accuracy** - Hardware‑accurate MMC2/MMC4 latch triggering using real pattern fetch addresses (fine‑Y + both bitplanes)
 * ✅ **Stable IRQ Timing** - MMC3 IRQs driven by true A12 rising‑edge detection
 * ✅ **Multiple ROM Loading Options** - Load ROM button, drag & drop, or click overlay
-* ✅ **Save States** - Quick save/load with multiple slots (F5/F8)
+* ✅ **Save States (Strict v3)** - In-memory quick save/load plus persistent slot saves
 * ✅ **Gamepad Support** - Native browser Gamepad API integration
 * ✅ **Debug Snapshots** - F9 dumps mapper/PPU state at configurable scanline
 
@@ -23,13 +23,13 @@ A modernized Nintendo Entertainment System (NES) emulator written in JavaScript.
 2. Serve the files with any HTTP server:
 
    ```bash
-   # nginx
-   http://localhost/ai-nes/nes.htm
-   
+   # Python
+   python3 -m http.server 8080
+
    # Node.js
-   npx serve
+   npx serve .
    ```
-3. Open `http://localhost/ai-nes/nes.htm` in your browser
+3. Open `http://localhost:8080/nes.htm` (or the URL printed by your server)
 4. Click to start or drag a `.nes` ROM file onto the emulator
 
 ## Controls
@@ -74,7 +74,7 @@ Gamepad support is automatic via the Gamepad API.
         ├── mapper003.js        # CNROM
         ├── mapper004.js        # MMC3
         ├── mapper005.js        # MMC5
-        ├── mapper006.js        # FFE
+        ├── mapper006.js        # MMC6 (Mapper 4, submapper 1)
         ├── mapper007.js        # AxROM
         ├── mapper009.js        # MMC2
         ├── mapper010.js        # MMC4
@@ -92,40 +92,44 @@ Gamepad support is automatic via the Gamepad API.
 
 ## Supported Mappers
 
-| Mapper                 | Status      | Notes                                        |
-| ---------------------- | :---------: | -------------------------------------------- |
-| NROM (0)               | ✅          | Baseline mapper                              |
-| MMC1 (1)               | ✅          | Correct shift‑register behavior              |
-| UxROM (2)              | ✅          | PRG banking                                  |
-| CNROM (3)              | ✅          | CHR banking                                  |
-| MMC3 (4)               | ✅          | A12‑driven IRQs                              |
-| MMC5 (5)               | ✅          | ExRAM + split screen + MMC5 audio            |
-| MMC6 (6)               | ✅          | Extension of MMC3                            |
-| AxROM (7)              | ✅          | 1KB VRAM page switching for nametables       |
-| MMC2 (9)               | ✅          | Accurate CHR latch timing (Punch‑Out!!!)     |
-| MMC4 (10)              | ✅          | Dual latch variant                           |
-| Color Dreams (11)      | ✅          | 32KB PRG bank switching                      |
-| VRC2 / VRC4 (21)       | ✅          | 8-bit CHR registers (up to 256KB CHR)        |
-| VRC2 / VRC4 (25)       | ✅          | 8-bit CHR registers (up to 256KB CHR)        |
-| NINA-001 (34)          | ✅          | 2x 4KB CHR bank switching                    |
-| NES-QJ (47)            | ✅          | Each block has 128k PRG and 128k CHR         |
-| GxROM (66)             | ✅          | CHR-ROM: 8KB switchable banks                |
-| Sunsoft FME-7 (69)     | ✅          | PRG/CHR banking + IRQ; 5B audio regs tracked |
-| NINA-03 / NINA-06 (79) | ✅          | CHR-ROM: 8KB switchable banks                |
-| DxROM (206)            | ✅          | Extends MMC3 \| No Scanline IRQ              |
+| Mapper | Status | Notes |
+| ------ | :----: | ----- |
+| NROM (0) | ✅ | Baseline discrete mapper |
+| MMC1 (1) | ✅ | Shift-register control + PRG/CHR banking |
+| UxROM (2) | ✅ | PRG banking |
+| CNROM (3) | ✅ | CHR banking |
+| MMC3 (4) | ✅ | A12-driven IRQs |
+| MMC6 (4, submapper 1) | ✅ | MMC3-derived with MMC6 WRAM behavior |
+| MMC5 (5) | ✅ | ExRAM + split-screen + extended banking |
+| AxROM (7) | ✅ | PRG banking + one-screen mirroring |
+| MMC2 (9) | ✅ | CHR latch timing (e.g. Punch-Out!!) |
+| MMC4 (10) | ✅ | MMC2-style dual latch behavior |
+| Color Dreams (11, 144) | ✅ | PRG/CHR banking |
+| VRC2 / VRC4 (21) | ✅ | Variant address-line handling |
+| VRC2 / VRC4 (25) | ✅ | Variant address-line handling + IRQ |
+| Mapper 34 (BNROM + NINA-001/002) | ✅ | NES 2.0 submapper-aware merged implementation |
+| NES-QJ (47) | ✅ | MMC3-derived extension |
+| GxROM (66) | ✅ | PRG/CHR banking |
+| Sunsoft FME-7 / 5B (69) | ✅ | PRG/CHR banking + IRQ + expansion audio |
+| NINA-03 / NINA-06 (79) | ✅ | PRG/CHR banking |
 
+Notes:
+- Mapper 206 (`DxROM`) is identified by `ROM` metadata, but is **not** currently implemented in the mapper factory.
+- MMC6 is implemented via mapper 4 + submapper 1 (not standalone mapper ID 6 in factory dispatch).
 
 ## Design Philosophy
 
-This emulator intentionally avoids hard‑coding mapper IDs inside the PPU or CPU. Instead:
+This emulator keeps CPU and PPU behavior mapper-agnostic. Mapper-specific behavior is isolated in mapper modules.
 
-* Each mapper is modular - in its own file as if it were a hardware component, which then **declares behavioral capabilities** (e.g., CHR latch, A12 IRQ, nametable override, etc.)
-* The PPU calls mapper hooks **only when the corresponding capability flag is set**
-* If a capability is declared, the mapper guarantees the required method exists
+Core rules:
 
-This approach prevents cross‑mapper regressions and makes new mappers significantly easier to add while expanding the library of games that can run.
+* Each mapper is a modular hardware-like component in its own file.
+* Timing-sensitive paths use explicit capability flags (`hasVramAddressHook`, `hasScanlineIrq`, etc.).
+* CPU/PPU call the standardized mapper hook surface (`ppuRead`, `ppuWrite`, `notifyVramAddressChange`, `processCpuClock`, etc.) without mapper-ID branching.
 
-For deep technical details, see **[TECHNICAL.md](https://github.com/ZeroGlitchX/ai-NES/blob/main/docs/TECHNICAL.md)**.
+This approach reduces cross-mapper regressions and makes incremental mapper additions straightforward.
+
+For deep technical details, see [docs/TECHNICAL.md](docs/TECHNICAL.md).
 
 ## Development Notes
 
@@ -135,13 +139,15 @@ The emulator uses an **AudioWorklet-based** audio system:
 
 - Runs on a dedicated audio thread for glitch-free playback
 - Audio samples are batched and sent to the worklet to minimize postMessage overhead
-- Expansion audio sources (such as MMC5) are mixed into the APU output path
+- Expansion audio sources are mixed into the APU output path
 
 ### Save States
 
-- **F5** - Quick save to current slot
-- **F8** - Quick load from current slot
-- Multiple save slots available via UI dropdown
+- **F5** - Quick save (in-memory)
+- **F8** - Quick load (in-memory)
+- **Shift + 1..9** - Save to slot 0..8
+- **1..9** - Load from slot 0..8
+- Persistent save files are strict **version 3** only (older versions are intentionally rejected)
 
 ### Debugging
 
@@ -152,11 +158,11 @@ The debug module (`debug/debug.js`) provides Mesen-comparable state dumps:
 - MMC5 games include full mapper state + audio registers
 - Console access: `nesDebug.outputAll()` or `nesDebug.targetScanline = 100`
 
-See **[DEBUG_INTEGRATION.md](https://github.com/ZeroGlitchX/ai-NES/blob/main/docs/DEBUG_INTEGRATION.md)** for full documentation.
+See [docs/DEBUG_INTEGRATION.md](docs/DEBUG_INTEGRATION.md) for full documentation.
 
 ## Credits
 
-This emulator is inspired by other JavaScript NES emulators, and is coded to behave like console reference emulators. The CPU, PPU and APU are are modular and designed to behave like NES hardware.
+This emulator is inspired by other JavaScript NES emulators, and is coded to behave like console reference emulators. The CPU, PPU, APU, and mappers are modular and designed to behave like NES hardware components.
 
 Contributed by **ZeroGlitchX** and an assortment of AI friends.
 
@@ -180,7 +186,7 @@ And a special thanks to **[AccuracyCoin](https://github.com/100thCoin/AccuracyCo
 
 ## Compatibility Notes
 
-If you want to make any improvements, please take a look at the **[TECHNICAL.md](https://github.com/ZeroGlitchX/ai-NES/blob/main/docs/TECHNICAL.md)** and **[ARCHITECTURE.md](https://github.com/ZeroGlitchX/ai-NES/blob/main/docs/ARCHITECTURE.md)** documents and give it a whirl!
+If you want to make improvements, start with [docs/TECHNICAL.md](docs/TECHNICAL.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ---
 
