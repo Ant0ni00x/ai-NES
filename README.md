@@ -1,5 +1,8 @@
 ## ai-NES - Modernized JavaScript NES Emulator
 
+![JavaScript](https://img.shields.io/badge/JavaScript-vanilla-F7DF1E)
+![License](https://img.shields.io/badge/license-MIT-blue)
+
 A modernized Nintendo Entertainment System (NES) emulator written in JavaScript. This project focuses on **accuracy, maintainability, and clean architecture**, with particular emphasis on correct mapper behavior and long-term extensibility.
 
 ## Features
