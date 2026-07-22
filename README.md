@@ -28,6 +28,7 @@ A modernized Nintendo Entertainment System (NES) emulator written in JavaScript.
    ```bash
    # No install needed. Just dropt the files into a Web-enabled directory
    # then point at
+   
    http://localhost/ai-nes/nes.htm
    ```
 3. Open `http://localhost/ai-nes/nes.htm` (or the URL printed by your server)
