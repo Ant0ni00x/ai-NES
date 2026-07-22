@@ -26,13 +26,11 @@ A modernized Nintendo Entertainment System (NES) emulator written in JavaScript.
 2. Serve the files with any HTTP server:
 
    ```bash
-   # Python
-   python3 -m http.server 8080
-
-   # Node.js
-   npx serve .
+   # No install needed. Just dropt the files into a Web-enabled directory
+   # then point at
+   http://localhost/ai-nes/nes.htm
    ```
-3. Open `http://localhost:8080/nes.htm` (or the URL printed by your server)
+3. Open `http://localhost/ai-nes/nes.htm` (or the URL printed by your server)
 4. Click to start or drag a `.nes` ROM file onto the emulator
 
 ## Controls
